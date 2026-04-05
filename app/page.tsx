@@ -1,7 +1,46 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { DiscogsRelease, Playlist } from "@/lib/discogs";
+import rollingStone500 from "@/lib/rolling-stone-500.json";
+
+// ── Rolling Stone 500 helpers ─────────────────────────────────────────────────
+
+type RS500Entry = { rank: number; artist: string; album: string; year: number };
+type RS500Filter = "all" | "owned" | "missing";
+
+function normalizeStr(s: string) {
+  return s
+    .toLowerCase()
+    .replace(/\s*\(\d+\)\s*$/, "") // strip Discogs duplicate suffix like "(2)"
+    .replace(/[^a-z0-9 ]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeArtist(s: string) {
+  return normalizeStr(s).replace(/^the /, "");
+}
+
+function buildRS500Matches(releases: DiscogsRelease[]): Map<number, DiscogsRelease> {
+  const result = new Map<number, DiscogsRelease>();
+  for (const entry of rollingStone500 as RS500Entry[]) {
+    const normArtist = normalizeArtist(entry.artist);
+    const normAlbum = normalizeStr(entry.album);
+    const match = releases.find((r) => {
+      const info = r.basic_information;
+      const artistMatch = info.artists.some((a) => {
+        const na = normalizeArtist(a.name);
+        return na === normArtist || na.includes(normArtist) || normArtist.includes(na);
+      });
+      if (!artistMatch) return false;
+      const na = normalizeStr(info.title);
+      return na === normAlbum || na.includes(normAlbum) || normAlbum.includes(na);
+    });
+    if (match) result.set(entry.rank, match);
+  }
+  return result;
+}
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -102,9 +141,54 @@ function RecordCard({
   );
 }
 
+function RS500Row({
+  entry,
+  match,
+}: {
+  entry: RS500Entry;
+  match: DiscogsRelease | undefined;
+}) {
+  return (
+    <div
+      className={`flex items-center gap-3 rounded-lg border p-3 transition-colors ${
+        match
+          ? "border-green-800 bg-green-950/30"
+          : "border-zinc-800 bg-zinc-900"
+      }`}
+    >
+      <span className="w-8 shrink-0 text-right font-mono text-sm text-zinc-500">
+        {entry.rank}
+      </span>
+      {match?.basic_information.thumb ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={match.basic_information.thumb}
+          alt={entry.album}
+          className="h-10 w-10 shrink-0 rounded object-cover"
+        />
+      ) : (
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded bg-zinc-800 text-xl text-zinc-600">
+          ♪
+        </div>
+      )}
+      <div className="min-w-0 flex-1">
+        <p className="truncate font-semibold text-zinc-100">{entry.album}</p>
+        <p className="truncate text-sm text-zinc-400">
+          {entry.artist} · {entry.year}
+        </p>
+      </div>
+      {match && (
+        <span className="shrink-0 rounded-full bg-green-900 px-2 py-0.5 text-xs font-medium text-green-300">
+          Owned
+        </span>
+      )}
+    </div>
+  );
+}
+
 // ── main page ─────────────────────────────────────────────────────────────────
 
-type View = "collection" | "playlists";
+type View = "collection" | "playlists" | "rs500";
 
 export default function Home() {
   // credentials
@@ -122,6 +206,7 @@ export default function Home() {
   const [view, setView] = useState<View>("collection");
   const [selectedGenre, setSelectedGenre] = useState<string>("All");
   const [search, setSearch] = useState("");
+  const [rs500Filter, setRS500Filter] = useState<RS500Filter>("all");
 
   // playlists
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
@@ -240,6 +325,15 @@ export default function Home() {
     },
     [activePlaylistId]
   );
+
+  // Rolling Stone 500 matching
+  const rs500Matches = useMemo(() => buildRS500Matches(releases), [releases]);
+  const rs500Entries = rollingStone500 as RS500Entry[];
+  const rs500Filtered = rs500Entries.filter((e) => {
+    if (rs500Filter === "owned") return rs500Matches.has(e.rank);
+    if (rs500Filter === "missing") return !rs500Matches.has(e.rank);
+    return true;
+  });
 
   // filtered releases for collection view
   const genres = ["All", ...getGenres(releases)];
@@ -375,17 +469,17 @@ export default function Home() {
 
       {/* nav tabs */}
       <div className="flex shrink-0 gap-1 border-b border-zinc-800 bg-zinc-900 px-4">
-        {(["collection", "playlists"] as View[]).map((v) => (
+          {(["collection", "playlists", "rs500"] as View[]).map((v) => (
           <button
             key={v}
             onClick={() => setView(v)}
-            className={`border-b-2 px-4 py-2 text-sm font-medium capitalize transition-colors ${
+            className={`border-b-2 px-4 py-2 text-sm font-medium transition-colors ${
               view === v
                 ? "border-amber-500 text-amber-400"
                 : "border-transparent text-zinc-400 hover:text-zinc-200"
             }`}
           >
-            {v}
+            {v === "rs500" ? "RS 500" : v.charAt(0).toUpperCase() + v.slice(1)}
             {v === "collection" && releases.length > 0 && (
               <span className="ml-2 rounded-full bg-zinc-800 px-1.5 py-0.5 text-xs text-zinc-400">
                 {releases.length}
@@ -396,12 +490,17 @@ export default function Home() {
                 {playlists.length}
               </span>
             )}
+            {v === "rs500" && rs500Matches.size > 0 && (
+              <span className="ml-2 rounded-full bg-green-900 px-1.5 py-0.5 text-xs text-green-300">
+                {rs500Matches.size}
+              </span>
+            )}
           </button>
         ))}
       </div>
 
       {/* body */}
-      {view === "collection" ? (
+      {view === "collection" && (
         <div className="flex min-h-0 flex-1 overflow-hidden">
           {/* genre sidebar */}
           <aside className="hidden w-44 shrink-0 overflow-y-auto border-r border-zinc-800 bg-zinc-900 p-3 sm:block">
@@ -482,7 +581,8 @@ export default function Home() {
             </div>
           </div>
         </div>
-      ) : (
+      )}
+      {view === "playlists" && (
         // ── playlists view ──────────────────────────────────────────────────────
         <div className="flex min-h-0 flex-1 overflow-hidden">
           {/* playlist list */}
@@ -589,6 +689,64 @@ export default function Home() {
                 </div>
               </>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* rs500 view */}
+      {view === "rs500" && (
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          {/* summary bar */}
+          <div className="shrink-0 border-b border-zinc-800 bg-zinc-950 px-4 py-3">
+            <div className="mb-2 flex items-center justify-between">
+              <div>
+                <span className="text-lg font-bold text-zinc-100">
+                  {rs500Matches.size}
+                  <span className="text-zinc-400 font-normal"> / 500</span>
+                </span>
+                <span className="ml-2 text-sm text-zinc-400">Rolling Stone Greatest Albums</span>
+              </div>
+              <span className="text-sm text-zinc-500">
+                {Math.round((rs500Matches.size / 500) * 100)}%
+              </span>
+            </div>
+            <div className="h-2 overflow-hidden rounded-full bg-zinc-800">
+              <div
+                className="h-full bg-green-600 transition-all"
+                style={{ width: `${(rs500Matches.size / 500) * 100}%` }}
+              />
+            </div>
+            {/* filter buttons */}
+            <div className="mt-3 flex gap-2">
+              {(["all", "owned", "missing"] as RS500Filter[]).map((f) => (
+                <button
+                  key={f}
+                  onClick={() => setRS500Filter(f)}
+                  className={`rounded-lg px-3 py-1 text-sm font-medium transition-colors ${
+                    rs500Filter === f
+                      ? "bg-amber-500 text-zinc-950"
+                      : "border border-zinc-700 text-zinc-400 hover:text-zinc-200"
+                  }`}
+                >
+                  {f.charAt(0).toUpperCase() + f.slice(1)}
+                  <span className="ml-1.5 text-xs opacity-70">
+                    {f === "all" ? 500 : f === "owned" ? rs500Matches.size : 500 - rs500Matches.size}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+          {/* list */}
+          <div className="flex-1 overflow-y-auto p-4">
+            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+              {rs500Filtered.map((entry) => (
+                <RS500Row
+                  key={entry.rank}
+                  entry={entry}
+                  match={rs500Matches.get(entry.rank)}
+                />
+              ))}
+            </div>
           </div>
         </div>
       )}
