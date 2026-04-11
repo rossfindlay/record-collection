@@ -408,14 +408,20 @@ export default function Home() {
   const getSpotifyToken = useCallback(async (tokens: SpotifyTokens): Promise<string | null> => {
     if (Date.now() < tokens.expiresAt - 60_000) return tokens.accessToken;
     const storedClientId = loadFromStorage<string>("spotify_client_id", "");
+    if (!storedClientId) return null;
     try {
-      const res = await fetch("/api/spotify/callback", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ refreshToken: tokens.refreshToken, clientId: storedClientId }),
+      // Refresh directly from the browser — PKCE is designed for this.
+      const res = await fetch("https://accounts.spotify.com/api/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: tokens.refreshToken,
+          client_id: storedClientId,
+        }).toString(),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
+      if (!res.ok) throw new Error(data.error_description || data.error || "Token refresh failed");
       const refreshed: SpotifyTokens = {
         accessToken: data.access_token,
         refreshToken: data.refresh_token ?? tokens.refreshToken,
@@ -463,13 +469,20 @@ export default function Home() {
     const redirectUri = `${window.location.origin}${window.location.pathname}`;
     (async () => {
       try {
-        const res = await fetch("/api/spotify/callback", {
+        // Exchange code for tokens directly — no server proxy needed for PKCE.
+        const res = await fetch("https://accounts.spotify.com/api/token", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ code, codeVerifier: pkce.verifier, redirectUri, clientId: pkce.clientId }),
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            grant_type: "authorization_code",
+            code,
+            redirect_uri: redirectUri,
+            client_id: pkce.clientId,
+            code_verifier: pkce.verifier,
+          }).toString(),
         });
         const data = await res.json();
-        if (!res.ok) throw new Error(data.error);
+        if (!res.ok) throw new Error(data.error_description || data.error || "Token exchange failed");
         const tokens: SpotifyTokens = {
           accessToken: data.access_token,
           refreshToken: data.refresh_token,
