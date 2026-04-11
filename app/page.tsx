@@ -306,10 +306,28 @@ export default function Home() {
     setWantlistError("");
     setWantlistProgress({ loaded: 0, total: 0 });
 
+    // Pace requests to stay within Discogs's 60 req/min rate limit.
+    // Each fetch also takes ~300-500ms in flight, so 700ms gap keeps us
+    // comfortably under the limit even for very large wantlists.
+    const DELAY_MS = 700;
+    const MAX_RETRIES = 3;
+
+    async function fetchPage(page: number): Promise<Response> {
+      const url = `/api/discogs/wantlist?username=${encodeURIComponent(user)}&token=${encodeURIComponent(tok)}&page=${page}&per_page=100`;
+      for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        const res = await fetch(url);
+        if (res.status === 429) {
+          // Back off for progressively longer before retrying
+          await new Promise((r) => setTimeout(r, 5000 * (attempt + 1)));
+          continue;
+        }
+        return res;
+      }
+      throw new Error("Rate limited by Discogs — please try again in a minute");
+    }
+
     try {
-      const firstRes = await fetch(
-        `/api/discogs/wantlist?username=${encodeURIComponent(user)}&token=${encodeURIComponent(tok)}&page=1&per_page=100`
-      );
+      const firstRes = await fetchPage(1);
       const first = await firstRes.json();
       if (!firstRes.ok) throw new Error(first.error || "Failed to fetch wantlist");
 
@@ -319,9 +337,8 @@ export default function Home() {
       setWantlistProgress({ loaded: all.length, total });
 
       for (let p = 2; p <= pages; p++) {
-        const res = await fetch(
-          `/api/discogs/wantlist?username=${encodeURIComponent(user)}&token=${encodeURIComponent(tok)}&page=${p}&per_page=100`
-        );
+        await new Promise((r) => setTimeout(r, DELAY_MS));
+        const res = await fetchPage(p);
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Fetch error");
         all.push(...data.wants);
@@ -836,7 +853,7 @@ export default function Home() {
                     className="shrink-0 rounded-lg border border-zinc-700 px-3 py-1 text-xs text-zinc-400 hover:border-zinc-500 hover:text-zinc-200 disabled:opacity-50"
                   >
                     {wantlistLoading
-                      ? `${wantlistProgress.loaded}/${wantlistProgress.total}`
+                      ? `${wantlistProgress.loaded.toLocaleString()} / ${wantlistProgress.total.toLocaleString()}`
                       : "Refresh Wantlist"}
                   </button>
                 </>
@@ -851,7 +868,7 @@ export default function Home() {
                   className="rounded-lg border border-zinc-700 px-3 py-1 text-sm text-zinc-400 hover:border-blue-600 hover:text-blue-400 disabled:opacity-50"
                 >
                   {wantlistLoading
-                    ? `Loading wantlist… ${wantlistProgress.loaded}${wantlistProgress.total ? ` / ${wantlistProgress.total}` : ""}`
+                    ? `Loading wantlist… ${wantlistProgress.loaded.toLocaleString()}${wantlistProgress.total ? ` / ${wantlistProgress.total.toLocaleString()}` : ""}`
                     : "Load Wantlist"}
                 </button>
               )}

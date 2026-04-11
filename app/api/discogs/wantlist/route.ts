@@ -24,13 +24,24 @@ export async function GET(req: NextRequest) {
       },
     });
 
-    const data = await res.json();
-
-    if (!res.ok) {
+    // Parse body safely — Discogs can return an HTML error page (e.g. from
+    // Cloudflare) when rate-limited or under load, which would cause res.json()
+    // to throw and swallow the real status code.
+    let data: unknown;
+    try {
+      data = await res.json();
+    } catch {
       return NextResponse.json(
-        { error: data.message || "Discogs API error" },
+        { error: res.status === 429 ? "Rate limited by Discogs" : "Discogs returned an unexpected response" },
         { status: res.status }
       );
+    }
+
+    if (!res.ok) {
+      const msg =
+        (data as { message?: string })?.message ||
+        (res.status === 429 ? "Rate limited by Discogs" : "Discogs API error");
+      return NextResponse.json({ error: msg }, { status: res.status });
     }
 
     return NextResponse.json(data);
