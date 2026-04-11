@@ -384,7 +384,17 @@ export default function Home() {
       }
 
       setWantlist(all);
-      saveToStorage("discogs_wantlist", all);
+      // Only persist the fields we actually use (matching + thumb display) so
+      // large wantlists don't exceed the 5 MB localStorage quota.
+      const slim = all.map((w) => ({
+        id: w.id,
+        basic_information: {
+          title: w.basic_information.title,
+          thumb: w.basic_information.thumb,
+          artists: w.basic_information.artists.map((a) => ({ name: a.name })),
+        },
+      }));
+      saveToStorage("discogs_wantlist", slim);
     } catch (e) {
       setWantlistError(e instanceof Error ? e.message : "Unknown error");
     } finally {
