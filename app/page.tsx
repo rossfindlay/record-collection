@@ -495,11 +495,13 @@ export default function Home() {
       const token = await getSpotifyToken(tokens);
       if (!token) throw new Error("Could not get Spotify access token");
 
+      // Call Spotify directly from the browser — PKCE tokens support CORS.
       const res = await fetch(
-        `/api/spotify/top?access_token=${encodeURIComponent(token)}&type=tracks&time_range=${timeRange}&limit=50`
+        `https://api.spotify.com/v1/me/top/tracks?time_range=${timeRange}&limit=50`,
+        { headers: { Authorization: `Bearer ${token}` } }
       );
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to fetch top tracks");
+      if (!res.ok) throw new Error((data as { error?: { message?: string } })?.error?.message || "Failed to fetch top tracks");
 
       const tracks = (data.items as SpotifyTrack[]) ?? [];
       const albums = tracksToAlbums(tracks);
@@ -523,10 +525,11 @@ export default function Home() {
       if (!token) throw new Error("Could not get Spotify access token");
 
       const res = await fetch(
-        `/api/spotify/playlists?access_token=${encodeURIComponent(token)}&limit=50`
+        `https://api.spotify.com/v1/me/playlists?limit=50`,
+        { headers: { Authorization: `Bearer ${token}` } }
       );
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to fetch playlists");
+      if (!res.ok) throw new Error((data as { error?: { message?: string } })?.error?.message || "Failed to fetch playlists");
 
       setSpotifyPlaylists(data.items ?? []);
       saveToStorage("spotify_playlists", data.items ?? []);
@@ -552,18 +555,13 @@ export default function Home() {
 
       for (let page = 0; page < MAX_PAGES; page++) {
         const res = await fetch(
-          `/api/spotify/playlists?access_token=${encodeURIComponent(token)}&playlist_id=${playlistId}&limit=${limit}&offset=${offset}`
+          `https://api.spotify.com/v1/playlists/${encodeURIComponent(playlistId)}/tracks?limit=${limit}&offset=${offset}`,
+          { headers: { Authorization: `Bearer ${token}` } }
         );
         const data: SpotifyPlaylistTracksResponse = await res.json();
-        if (!res.ok) {
-          const errData = data as unknown as { error: string; spotifyStatus?: number };
-          if (res.status === 403) {
-            throw new Error(
-              "Spotify denied access to this playlist (403). Your connection may be using outdated permissions — try disconnecting and reconnecting Spotify."
-            );
-          }
-          throw new Error(errData.error || "Failed to fetch playlist tracks");
-        }
+        if (!res.ok) throw new Error(
+          (data as unknown as { error?: { message?: string } })?.error?.message || "Failed to fetch playlist tracks"
+        );
 
         for (const item of data.items ?? []) {
           if (item.track) allTracks.push(item.track);
