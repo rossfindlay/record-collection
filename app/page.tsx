@@ -181,7 +181,7 @@ function RS500Row({
   match,
   wanted,
   onAddToWantlist,
-  isAdding,
+  busyLabel,
   addError,
 }: {
   entry: RS500Entry;
