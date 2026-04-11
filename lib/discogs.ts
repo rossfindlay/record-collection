@@ -33,6 +33,33 @@ export interface Playlist {
   createdAt: string;
 }
 
+export interface DiscogsWantlistItem {
+  id: number;
+  date_added: string;
+  basic_information: {
+    id: number;
+    title: string;
+    year: number;
+    thumb: string;
+    cover_image: string;
+    artists: Array<{ name: string; id: number }>;
+    labels: Array<{ name: string; catno: string }>;
+    formats: Array<{ name: string; descriptions?: string[] }>;
+    genres: string[];
+    styles: string[];
+  };
+}
+
+export interface WantlistResponse {
+  wants: DiscogsWantlistItem[];
+  pagination: {
+    page: number;
+    pages: number;
+    per_page: number;
+    items: number;
+  };
+}
+
 export async function fetchCollection(
   username: string,
   token: string,
@@ -84,4 +111,42 @@ export function filterByGenre(
   genre: string
 ): DiscogsRelease[] {
   return releases.filter((r) => r.basic_information.genres.includes(genre));
+}
+
+export async function fetchWantlistPage(
+  username: string,
+  token: string,
+  page = 1,
+  perPage = 100
+): Promise<WantlistResponse> {
+  const url = `https://api.discogs.com/users/${encodeURIComponent(username)}/wants?page=${page}&per_page=${perPage}`;
+  const res = await fetch(url, {
+    headers: {
+      Authorization: `Discogs token=${token}`,
+      "User-Agent": "RecordCollectionApp/1.0",
+    },
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Discogs API error ${res.status}: ${text}`);
+  }
+  return res.json();
+}
+
+export async function fetchAllWantlistItems(
+  username: string,
+  token: string,
+  onProgress?: (loaded: number, total: number) => void
+): Promise<DiscogsWantlistItem[]> {
+  const first = await fetchWantlistPage(username, token, 1, 100);
+  const wants = [...first.wants];
+  onProgress?.(wants.length, first.pagination.items);
+
+  const pages = first.pagination.pages;
+  for (let p = 2; p <= pages; p++) {
+    const data = await fetchWantlistPage(username, token, p, 100);
+    wants.push(...data.wants);
+    onProgress?.(wants.length, first.pagination.items);
+  }
+  return wants;
 }

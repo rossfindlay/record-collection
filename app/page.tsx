@@ -1,13 +1,13 @@
 "use client";
 
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { DiscogsRelease, Playlist } from "@/lib/discogs";
+import { DiscogsRelease, DiscogsWantlistItem, Playlist } from "@/lib/discogs";
 import rollingStone500 from "@/lib/rolling-stone-500.json";
 
 // ── Rolling Stone 500 helpers ─────────────────────────────────────────────────
 
 type RS500Entry = { rank: number; artist: string; album: string; year: number };
-type RS500Filter = "all" | "owned" | "missing";
+type RS500Filter = "all" | "owned" | "wanted" | "missing";
 
 function normalizeStr(s: string) {
   return s
@@ -29,6 +29,26 @@ function buildRS500Matches(releases: DiscogsRelease[]): Map<number, DiscogsRelea
     const normAlbum = normalizeStr(entry.album);
     const match = releases.find((r) => {
       const info = r.basic_information;
+      const artistMatch = info.artists.some((a) => {
+        const na = normalizeArtist(a.name);
+        return na === normArtist || na.includes(normArtist) || normArtist.includes(na);
+      });
+      if (!artistMatch) return false;
+      const na = normalizeStr(info.title);
+      return na === normAlbum || na.includes(normAlbum) || normAlbum.includes(na);
+    });
+    if (match) result.set(entry.rank, match);
+  }
+  return result;
+}
+
+function buildRS500WantlistMatches(wantlist: DiscogsWantlistItem[]): Map<number, DiscogsWantlistItem> {
+  const result = new Map<number, DiscogsWantlistItem>();
+  for (const entry of rollingStone500 as RS500Entry[]) {
+    const normArtist = normalizeArtist(entry.artist);
+    const normAlbum = normalizeStr(entry.album);
+    const match = wantlist.find((w) => {
+      const info = w.basic_information;
       const artistMatch = info.artists.some((a) => {
         const na = normalizeArtist(a.name);
         return na === normArtist || na.includes(normArtist) || normArtist.includes(na);
@@ -144,26 +164,33 @@ function RecordCard({
 function RS500Row({
   entry,
   match,
+  wanted,
 }: {
   entry: RS500Entry;
   match: DiscogsRelease | undefined;
+  wanted: DiscogsWantlistItem | undefined;
 }) {
+  const thumb = match?.basic_information.thumb ?? wanted?.basic_information.thumb;
+  const thumbAlt = entry.album;
+
   return (
     <div
       className={`flex items-center gap-3 rounded-lg border p-3 transition-colors ${
         match
           ? "border-green-800 bg-green-950/30"
+          : wanted
+          ? "border-blue-800 bg-blue-950/30"
           : "border-zinc-800 bg-zinc-900"
       }`}
     >
       <span className="w-8 shrink-0 text-right font-mono text-sm text-zinc-500">
         {entry.rank}
       </span>
-      {match?.basic_information.thumb ? (
+      {thumb ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img
-          src={match.basic_information.thumb}
-          alt={entry.album}
+          src={thumb}
+          alt={thumbAlt}
           className="h-10 w-10 shrink-0 rounded object-cover"
         />
       ) : (
@@ -177,11 +204,18 @@ function RS500Row({
           {entry.artist} · {entry.year}
         </p>
       </div>
-      {match && (
-        <span className="shrink-0 rounded-full bg-green-900 px-2 py-0.5 text-xs font-medium text-green-300">
-          Owned
-        </span>
-      )}
+      <div className="flex shrink-0 flex-col items-end gap-1">
+        {match && (
+          <span className="rounded-full bg-green-900 px-2 py-0.5 text-xs font-medium text-green-300">
+            Owned
+          </span>
+        )}
+        {wanted && (
+          <span className="rounded-full bg-blue-900 px-2 py-0.5 text-xs font-medium text-blue-300">
+            Wanted
+          </span>
+        )}
+      </div>
     </div>
   );
 }
@@ -208,6 +242,12 @@ export default function Home() {
   const [search, setSearch] = useState("");
   const [rs500Filter, setRS500Filter] = useState<RS500Filter>("all");
 
+  // wantlist
+  const [wantlist, setWantlist] = useState<DiscogsWantlistItem[]>([]);
+  const [wantlistLoading, setWantlistLoading] = useState(false);
+  const [wantlistProgress, setWantlistProgress] = useState({ loaded: 0, total: 0 });
+  const [wantlistError, setWantlistError] = useState("");
+
   // playlists
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [activePlaylistId, setActivePlaylistId] = useState<string | null>(null);
@@ -219,6 +259,7 @@ export default function Home() {
     setSavedCreds(loadFromStorage("discogs_creds", null));
     setReleases(loadFromStorage("discogs_releases", []));
     setPlaylists(loadFromStorage("discogs_playlists", []));
+    setWantlist(loadFromStorage("discogs_wantlist", []));
   }, []);
 
   const fetchCollection = useCallback(async (user: string, tok: string) => {
@@ -257,6 +298,42 @@ export default function Home() {
       setError(e instanceof Error ? e.message : "Unknown error");
     } finally {
       setLoading(false);
+    }
+  }, []);
+
+  const fetchWantlist = useCallback(async (user: string, tok: string) => {
+    setWantlistLoading(true);
+    setWantlistError("");
+    setWantlistProgress({ loaded: 0, total: 0 });
+
+    try {
+      const firstRes = await fetch(
+        `/api/discogs/wantlist?username=${encodeURIComponent(user)}&token=${encodeURIComponent(tok)}&page=1&per_page=100`
+      );
+      const first = await firstRes.json();
+      if (!firstRes.ok) throw new Error(first.error || "Failed to fetch wantlist");
+
+      const all: DiscogsWantlistItem[] = [...first.wants];
+      const pages: number = first.pagination.pages;
+      const total: number = first.pagination.items;
+      setWantlistProgress({ loaded: all.length, total });
+
+      for (let p = 2; p <= pages; p++) {
+        const res = await fetch(
+          `/api/discogs/wantlist?username=${encodeURIComponent(user)}&token=${encodeURIComponent(tok)}&page=${p}&per_page=100`
+        );
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Fetch error");
+        all.push(...data.wants);
+        setWantlistProgress({ loaded: all.length, total });
+      }
+
+      setWantlist(all);
+      saveToStorage("discogs_wantlist", all);
+    } catch (e) {
+      setWantlistError(e instanceof Error ? e.message : "Unknown error");
+    } finally {
+      setWantlistLoading(false);
     }
   }, []);
 
@@ -328,10 +405,12 @@ export default function Home() {
 
   // Rolling Stone 500 matching
   const rs500Matches = useMemo(() => buildRS500Matches(releases), [releases]);
+  const rs500WantlistMatches = useMemo(() => buildRS500WantlistMatches(wantlist), [wantlist]);
   const rs500Entries = rollingStone500 as RS500Entry[];
   const rs500Filtered = rs500Entries.filter((e) => {
     if (rs500Filter === "owned") return rs500Matches.has(e.rank);
-    if (rs500Filter === "missing") return !rs500Matches.has(e.rank);
+    if (rs500Filter === "wanted") return rs500WantlistMatches.has(e.rank) && !rs500Matches.has(e.rank);
+    if (rs500Filter === "missing") return !rs500Matches.has(e.rank) && !rs500WantlistMatches.has(e.rank);
     return true;
   });
 
@@ -457,8 +536,10 @@ export default function Home() {
             onClick={() => {
               localStorage.removeItem("discogs_creds");
               localStorage.removeItem("discogs_releases");
+              localStorage.removeItem("discogs_wantlist");
               setSavedCreds(null);
               setReleases([]);
+              setWantlist([]);
             }}
             className="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-400 hover:border-zinc-500"
           >
@@ -698,42 +779,114 @@ export default function Home() {
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           {/* summary bar */}
           <div className="shrink-0 border-b border-zinc-800 bg-zinc-950 px-4 py-3">
+            {/* title row */}
             <div className="mb-2 flex items-center justify-between">
-              <div>
-                <span className="text-lg font-bold text-zinc-100">
-                  {rs500Matches.size}
-                  <span className="text-zinc-400 font-normal"> / 500</span>
-                </span>
-                <span className="ml-2 text-sm text-zinc-400">Rolling Stone Greatest Albums</span>
+              <div className="flex items-center gap-3">
+                <div>
+                  <span className="text-lg font-bold text-zinc-100">
+                    {rs500Matches.size}
+                    <span className="text-zinc-400 font-normal"> / 500</span>
+                  </span>
+                  <span className="ml-2 text-sm text-zinc-400">Rolling Stone Greatest Albums</span>
+                </div>
+                {savedCreds && (
+                  <a
+                    href={`https://www.discogs.com/${encodeURIComponent(savedCreds.username)}/wants`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="rounded-lg border border-zinc-700 px-3 py-1 text-sm text-zinc-400 transition-colors hover:border-blue-600 hover:text-blue-400"
+                  >
+                    View Wantlist ↗
+                  </a>
+                )}
               </div>
               <span className="text-sm text-zinc-500">
                 {Math.round((rs500Matches.size / 500) * 100)}%
               </span>
             </div>
+            {/* owned progress bar */}
             <div className="h-2 overflow-hidden rounded-full bg-zinc-800">
               <div
                 className="h-full bg-green-600 transition-all"
                 style={{ width: `${(rs500Matches.size / 500) * 100}%` }}
               />
             </div>
-            {/* filter buttons */}
-            <div className="mt-3 flex gap-2">
-              {(["all", "owned", "missing"] as RS500Filter[]).map((f) => (
+            {/* wantlist row */}
+            <div className="mt-2 flex items-center gap-3">
+              {wantlist.length > 0 ? (
+                <>
+                  <div className="flex-1">
+                    <div className="mb-1 flex items-center justify-between text-xs text-zinc-500">
+                      <span>{rs500WantlistMatches.size} / 500 on wantlist</span>
+                    </div>
+                    <div className="h-1.5 overflow-hidden rounded-full bg-zinc-800">
+                      <div
+                        className="h-full bg-blue-600 transition-all"
+                        style={{ width: `${(rs500WantlistMatches.size / 500) * 100}%` }}
+                      />
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      const u = savedCreds?.username ?? username;
+                      const t = savedCreds?.token ?? token;
+                      if (u && t) fetchWantlist(u, t);
+                    }}
+                    disabled={wantlistLoading}
+                    className="shrink-0 rounded-lg border border-zinc-700 px-3 py-1 text-xs text-zinc-400 hover:border-zinc-500 hover:text-zinc-200 disabled:opacity-50"
+                  >
+                    {wantlistLoading
+                      ? `${wantlistProgress.loaded}/${wantlistProgress.total}`
+                      : "Refresh Wantlist"}
+                  </button>
+                </>
+              ) : (
                 <button
-                  key={f}
-                  onClick={() => setRS500Filter(f)}
-                  className={`rounded-lg px-3 py-1 text-sm font-medium transition-colors ${
-                    rs500Filter === f
-                      ? "bg-amber-500 text-zinc-950"
-                      : "border border-zinc-700 text-zinc-400 hover:text-zinc-200"
-                  }`}
+                  onClick={() => {
+                    const u = savedCreds?.username ?? username;
+                    const t = savedCreds?.token ?? token;
+                    if (u && t) fetchWantlist(u, t);
+                  }}
+                  disabled={wantlistLoading}
+                  className="rounded-lg border border-zinc-700 px-3 py-1 text-sm text-zinc-400 hover:border-blue-600 hover:text-blue-400 disabled:opacity-50"
                 >
-                  {f.charAt(0).toUpperCase() + f.slice(1)}
-                  <span className="ml-1.5 text-xs opacity-70">
-                    {f === "all" ? 500 : f === "owned" ? rs500Matches.size : 500 - rs500Matches.size}
-                  </span>
+                  {wantlistLoading
+                    ? `Loading wantlist… ${wantlistProgress.loaded}${wantlistProgress.total ? ` / ${wantlistProgress.total}` : ""}`
+                    : "Load Wantlist"}
                 </button>
-              ))}
+              )}
+            </div>
+            {wantlistError && (
+              <p className="mt-2 text-xs text-red-400">{wantlistError}</p>
+            )}
+            {/* filter buttons */}
+            <div className="mt-3 flex flex-wrap gap-2">
+              {(["all", "owned", "wanted", "missing"] as RS500Filter[]).map((f) => {
+                const count =
+                  f === "all"
+                    ? 500
+                    : f === "owned"
+                    ? rs500Matches.size
+                    : f === "wanted"
+                    ? rs500WantlistMatches.size - [...rs500WantlistMatches.keys()].filter((k) => rs500Matches.has(k)).length
+                    : 500 - rs500Matches.size - (rs500WantlistMatches.size - [...rs500WantlistMatches.keys()].filter((k) => rs500Matches.has(k)).length);
+                return (
+                  <button
+                    key={f}
+                    onClick={() => setRS500Filter(f)}
+                    className={`rounded-lg px-3 py-1 text-sm font-medium transition-colors ${
+                      rs500Filter === f
+                        ? f === "wanted"
+                          ? "bg-blue-600 text-white"
+                          : "bg-amber-500 text-zinc-950"
+                        : "border border-zinc-700 text-zinc-400 hover:text-zinc-200"
+                    }`}
+                  >
+                    {f.charAt(0).toUpperCase() + f.slice(1)}
+                    <span className="ml-1.5 text-xs opacity-70">{count}</span>
+                  </button>
+                );
+              })}
             </div>
           </div>
           {/* list */}
@@ -744,6 +897,7 @@ export default function Home() {
                   key={entry.rank}
                   entry={entry}
                   match={rs500Matches.get(entry.rank)}
+                  wanted={rs500WantlistMatches.get(entry.rank)}
                 />
               ))}
             </div>
