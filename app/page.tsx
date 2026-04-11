@@ -180,10 +180,16 @@ function RS500Row({
   entry,
   match,
   wanted,
+  onAddToWantlist,
+  isAdding,
+  addError,
 }: {
   entry: RS500Entry;
   match: DiscogsRelease | undefined;
   wanted: DiscogsWantlistItem | undefined;
+  onAddToWantlist?: () => void;
+  isAdding?: boolean;
+  addError?: string;
 }) {
   const thumb = match?.basic_information.thumb ?? wanted?.basic_information.thumb;
   const thumbAlt = entry.album;
@@ -218,6 +224,11 @@ function RS500Row({
         <p className="truncate text-sm text-zinc-400">
           {entry.artist} · {entry.year}
         </p>
+        {addError && (
+          <p className="truncate text-xs text-red-400" title={addError}>
+            {addError}
+          </p>
+        )}
       </div>
       <div className="flex shrink-0 flex-col items-end gap-1">
         {match && (
@@ -229,6 +240,16 @@ function RS500Row({
           <span className="rounded-full bg-blue-900 px-2 py-0.5 text-xs font-medium text-blue-300">
             Wanted
           </span>
+        )}
+        {!match && !wanted && onAddToWantlist && (
+          <button
+            onClick={onAddToWantlist}
+            disabled={isAdding}
+            title="Add all vinyl versions of this album to your Discogs wantlist"
+            className="rounded-full border border-blue-700 px-2 py-0.5 text-xs text-blue-400 transition-colors hover:bg-blue-900/40 hover:text-blue-300 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {isAdding ? "Adding…" : "+ Wantlist"}
+          </button>
         )}
       </div>
     </div>
@@ -264,6 +285,9 @@ export default function Home() {
   const [wantlistLoading, setWantlistLoading] = useState(false);
   const [wantlistProgress, setWantlistProgress] = useState({ loaded: 0, total: 0 });
   const [wantlistError, setWantlistError] = useState("");
+  // per-entry add-to-wantlist state (keyed by RS500 rank)
+  const [addingRanks, setAddingRanks] = useState<number[]>([]);
+  const [addErrors, setAddErrors] = useState<Record<number, string>>({});
 
   // spotify
   const [spotifyTokens, setSpotifyTokens] = useState<SpotifyTokens | null>(null);
@@ -658,6 +682,81 @@ export default function Home() {
     });
     setActivePlaylistId((cur) => (cur === id ? null : cur));
   }, []);
+
+  const addToWantlist = useCallback(
+    async (entry: RS500Entry) => {
+      const u = savedCreds?.username ?? username;
+      const t = savedCreds?.token ?? token;
+      if (!u || !t) return;
+
+      setAddingRanks((prev) => [...prev, entry.rank]);
+      setAddErrors((prev) => {
+        const next = { ...prev };
+        delete next[entry.rank];
+        return next;
+      });
+
+      try {
+        const res = await fetch("/api/discogs/add-to-wantlist", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: u, token: t, artist: entry.artist, title: entry.album }),
+        });
+        const data = await res.json() as {
+          error?: string;
+          vinylVersions?: number;
+          added?: number;
+          releaseIds?: number[];
+        };
+
+        if (!res.ok) {
+          setAddErrors((prev) => ({ ...prev, [entry.rank]: data.error ?? "Failed to add to wantlist" }));
+          return;
+        }
+
+        // Optimistically update local wantlist so the "Wanted" badge appears
+        // immediately without needing a full wantlist refresh.
+        const fakeItem: DiscogsWantlistItem = {
+          id: data.releaseIds?.[0] ?? Date.now(),
+          date_added: new Date().toISOString(),
+          basic_information: {
+            id: data.releaseIds?.[0] ?? Date.now(),
+            title: entry.album,
+            year: entry.year,
+            thumb: "",
+            cover_image: "",
+            artists: [{ name: entry.artist, id: 0 }],
+            labels: [],
+            formats: [{ name: "Vinyl" }],
+            genres: [],
+            styles: [],
+          },
+        };
+
+        setWantlist((prev) => {
+          const updated = [...prev, fakeItem];
+          const slim = updated.map((w) => ({
+            id: w.id,
+            basic_information: {
+              title: w.basic_information.title,
+              thumb: w.basic_information.thumb,
+              artists: w.basic_information.artists.map((a) => ({ name: a.name })),
+            },
+          }));
+          saveToStorage("discogs_wantlist", slim);
+          return updated;
+        });
+      } catch (e) {
+        setAddErrors((prev) => ({
+          ...prev,
+          [entry.rank]: e instanceof Error ? e.message : "Unknown error",
+        }));
+      } finally {
+        setAddingRanks((prev) => prev.filter((r) => r !== entry.rank));
+      }
+    },
+    [savedCreds, username, token]
+  );
 
   const removeFromPlaylist = useCallback(
     (releaseId: number) => {
@@ -1177,6 +1276,9 @@ export default function Home() {
                   entry={entry}
                   match={rs500Matches.get(entry.rank)}
                   wanted={rs500WantlistMatches.get(entry.rank)}
+                  onAddToWantlist={savedCreds ? () => addToWantlist(entry) : undefined}
+                  isAdding={addingRanks.includes(entry.rank)}
+                  addError={addErrors[entry.rank]}
                 />
               ))}
             </div>
