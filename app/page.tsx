@@ -188,7 +188,8 @@ function RS500Row({
   match: DiscogsRelease | undefined;
   wanted: DiscogsWantlistItem | undefined;
   onAddToWantlist?: () => void;
-  isAdding?: boolean;
+  /** Text to show on the disabled button while work is in progress. */
+  busyLabel?: string;
   addError?: string;
 }) {
   const thumb = match?.basic_information.thumb ?? wanted?.basic_information.thumb;
@@ -244,11 +245,11 @@ function RS500Row({
         {!match && !wanted && onAddToWantlist && (
           <button
             onClick={onAddToWantlist}
-            disabled={isAdding}
+            disabled={!!busyLabel}
             title="Add all vinyl versions of this album to your Discogs wantlist"
             className="rounded-full border border-blue-700 px-2 py-0.5 text-xs text-blue-400 transition-colors hover:bg-blue-900/40 hover:text-blue-300 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {isAdding ? "Adding…" : "+ Wantlist"}
+            {busyLabel ?? "+ Wantlist"}
           </button>
         )}
       </div>
@@ -286,8 +287,14 @@ export default function Home() {
   const [wantlistProgress, setWantlistProgress] = useState({ loaded: 0, total: 0 });
   const [wantlistError, setWantlistError] = useState("");
   // per-entry add-to-wantlist state (keyed by RS500 rank)
+  const [checkingRanks, setCheckingRanks] = useState<number[]>([]);
   const [addingRanks, setAddingRanks] = useState<number[]>([]);
   const [addErrors, setAddErrors] = useState<Record<number, string>>({});
+  const [pendingAdd, setPendingAdd] = useState<{
+    entry: RS500Entry;
+    releaseIds: number[];
+    count: number;
+  } | null>(null);
 
   // spotify
   const [spotifyTokens, setSpotifyTokens] = useState<SpotifyTokens | null>(null);
@@ -683,31 +690,21 @@ export default function Home() {
     setActivePlaylistId((cur) => (cur === id ? null : cur));
   }, []);
 
-  const addToWantlist = useCallback(
-    async (entry: RS500Entry) => {
+  // Perform the actual wantlist adds for an RS500 entry given pre-fetched IDs.
+  const doAdd = useCallback(
+    async (entry: RS500Entry, releaseIds: number[]) => {
       const u = savedCreds?.username ?? username;
       const t = savedCreds?.token ?? token;
       if (!u || !t) return;
 
       setAddingRanks((prev) => [...prev, entry.rank]);
-      setAddErrors((prev) => {
-        const next = { ...prev };
-        delete next[entry.rank];
-        return next;
-      });
-
       try {
         const res = await fetch("/api/discogs/add-to-wantlist", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ username: u, token: t, artist: entry.artist, title: entry.album }),
+          body: JSON.stringify({ username: u, token: t, releaseIds }),
         });
-        const data = await res.json() as {
-          error?: string;
-          vinylVersions?: number;
-          added?: number;
-          releaseIds?: number[];
-        };
+        const data = await res.json() as { error?: string; releaseIds?: number[] };
 
         if (!res.ok) {
           setAddErrors((prev) => ({ ...prev, [entry.rank]: data.error ?? "Failed to add to wantlist" }));
@@ -757,6 +754,67 @@ export default function Home() {
     },
     [savedCreds, username, token]
   );
+
+  // First step: preview to get vinyl version count.
+  // If > 30, store in pendingAdd to show a confirmation modal.
+  // If ≤ 30, proceed straight to doAdd.
+  const addToWantlist = useCallback(
+    async (entry: RS500Entry) => {
+      const u = savedCreds?.username ?? username;
+      const t = savedCreds?.token ?? token;
+      if (!u || !t) return;
+
+      setCheckingRanks((prev) => [...prev, entry.rank]);
+      setAddErrors((prev) => {
+        const next = { ...prev };
+        delete next[entry.rank];
+        return next;
+      });
+
+      try {
+        const res = await fetch("/api/discogs/add-to-wantlist", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: u, token: t, artist: entry.artist, title: entry.album, preview: true }),
+        });
+        const data = await res.json() as {
+          error?: string;
+          vinylVersions?: number;
+          releaseIds?: number[];
+        };
+
+        if (!res.ok) {
+          setAddErrors((prev) => ({ ...prev, [entry.rank]: data.error ?? "Failed to find album on Discogs" }));
+          return;
+        }
+
+        const count = data.vinylVersions ?? 0;
+        const ids = data.releaseIds ?? [];
+
+        if (count > 30) {
+          setPendingAdd({ entry, releaseIds: ids, count });
+        } else {
+          await doAdd(entry, ids);
+        }
+      } catch (e) {
+        setAddErrors((prev) => ({
+          ...prev,
+          [entry.rank]: e instanceof Error ? e.message : "Unknown error",
+        }));
+      } finally {
+        setCheckingRanks((prev) => prev.filter((r) => r !== entry.rank));
+      }
+    },
+    [savedCreds, username, token, doAdd]
+  );
+
+  // Called when the user clicks "Add All N" in the confirmation modal.
+  const confirmAdd = useCallback(async () => {
+    if (!pendingAdd) return;
+    const { entry, releaseIds } = pendingAdd;
+    setPendingAdd(null);
+    await doAdd(entry, releaseIds);
+  }, [pendingAdd, doAdd]);
 
   const removeFromPlaylist = useCallback(
     (releaseId: number) => {
@@ -1277,7 +1335,13 @@ export default function Home() {
                   match={rs500Matches.get(entry.rank)}
                   wanted={rs500WantlistMatches.get(entry.rank)}
                   onAddToWantlist={savedCreds ? () => addToWantlist(entry) : undefined}
-                  isAdding={addingRanks.includes(entry.rank)}
+                  busyLabel={
+                    checkingRanks.includes(entry.rank)
+                      ? "Checking…"
+                      : addingRanks.includes(entry.rank)
+                      ? "Adding…"
+                      : undefined
+                  }
                   addError={addErrors[entry.rank]}
                 />
               ))}
@@ -1653,6 +1717,51 @@ export default function Home() {
               )}
             </div>
           )}
+        </div>
+      )}
+
+      {/* add-to-wantlist confirmation modal (> 30 vinyl versions) */}
+      {pendingAdd && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70"
+          onClick={() => setPendingAdd(null)}
+        >
+          <div
+            className="w-full max-w-sm rounded-2xl border border-zinc-700 bg-zinc-900 p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="mb-3 text-lg font-bold">Add to Wantlist</h3>
+            <p className="mb-2 text-sm text-zinc-300">
+              Found{" "}
+              <span className="font-semibold text-white">{pendingAdd.count} vinyl versions</span> of{" "}
+              <span className="font-semibold text-white">&ldquo;{pendingAdd.entry.album}&rdquo;</span>.
+            </p>
+            <p className="mb-5 text-sm text-zinc-400">
+              Adding all versions will make roughly{" "}
+              <span className="text-zinc-300">
+                {pendingAdd.count >= 120
+                  ? `${Math.ceil(pendingAdd.count / 60)} minutes`
+                  : pendingAdd.count >= 60
+                  ? "about a minute"
+                  : `${Math.ceil(pendingAdd.count * 0.5)} seconds`}
+              </span>{" "}
+              of API calls. Do you want to continue?
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={confirmAdd}
+                className="flex-1 rounded-lg bg-blue-600 py-2 font-semibold text-white transition-colors hover:bg-blue-500"
+              >
+                Add All {pendingAdd.count}
+              </button>
+              <button
+                onClick={() => setPendingAdd(null)}
+                className="flex-1 rounded-lg border border-zinc-700 py-2 text-zinc-300 transition-colors hover:border-zinc-500"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
