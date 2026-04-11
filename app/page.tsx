@@ -2,6 +2,17 @@
 
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { DiscogsRelease, DiscogsWantlistItem, Playlist } from "@/lib/discogs";
+import {
+  SpotifyTokens,
+  SpotifyTrack,
+  SpotifyAlbum,
+  SpotifyPlaylist,
+  SpotifyPlaylistTracksResponse,
+  generateCodeVerifier,
+  generateCodeChallenge,
+  buildAuthUrl,
+  tracksToAlbums,
+} from "@/lib/spotify";
 import rollingStone500 from "@/lib/rolling-stone-500.json";
 
 // ── Rolling Stone 500 helpers ─────────────────────────────────────────────────
@@ -222,7 +233,9 @@ function RS500Row({
 
 // ── main page ─────────────────────────────────────────────────────────────────
 
-type View = "collection" | "playlists" | "rs500";
+type View = "collection" | "playlists" | "rs500" | "spotify";
+type SpotifyTimeRange = "long_term" | "medium_term" | "short_term";
+type SpotifyViewMode = "top" | "playlists";
 
 export default function Home() {
   // credentials
@@ -248,6 +261,21 @@ export default function Home() {
   const [wantlistProgress, setWantlistProgress] = useState({ loaded: 0, total: 0 });
   const [wantlistError, setWantlistError] = useState("");
 
+  // spotify
+  const [spotifyTokens, setSpotifyTokens] = useState<SpotifyTokens | null>(null);
+  const [spotifyClientId, setSpotifyClientId] = useState("");
+  const [spotifyConnecting, setSpotifyConnecting] = useState(false);
+  const [spotifyError, setSpotifyError] = useState("");
+  const [spotifyViewMode, setSpotifyViewMode] = useState<SpotifyViewMode>("top");
+  const [spotifyTimeRange, setSpotifyTimeRange] = useState<SpotifyTimeRange>("long_term");
+  const [spotifyTopAlbums, setSpotifyTopAlbums] = useState<SpotifyAlbum[]>([]);
+  const [spotifyTopLoading, setSpotifyTopLoading] = useState(false);
+  const [spotifyPlaylists, setSpotifyPlaylists] = useState<SpotifyPlaylist[]>([]);
+  const [spotifyPlaylistsLoading, setSpotifyPlaylistsLoading] = useState(false);
+  const [activeSpotifyPlaylistId, setActiveSpotifyPlaylistId] = useState<string | null>(null);
+  const [spotifyPlaylistAlbums, setSpotifyPlaylistAlbums] = useState<SpotifyAlbum[]>([]);
+  const [spotifyPlaylistLoading, setSpotifyPlaylistLoading] = useState(false);
+
   // playlists
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [activePlaylistId, setActivePlaylistId] = useState<string | null>(null);
@@ -260,6 +288,10 @@ export default function Home() {
     setReleases(loadFromStorage("discogs_releases", []));
     setPlaylists(loadFromStorage("discogs_playlists", []));
     setWantlist(loadFromStorage("discogs_wantlist", []));
+    setSpotifyTokens(loadFromStorage("spotify_tokens", null));
+    setSpotifyClientId(loadFromStorage("spotify_client_id", ""));
+    setSpotifyTopAlbums(loadFromStorage("spotify_top_albums", []));
+    setSpotifyPlaylists(loadFromStorage("spotify_playlists", []));
   }, []);
 
   const fetchCollection = useCallback(async (user: string, tok: string) => {
@@ -353,6 +385,190 @@ export default function Home() {
       setWantlistLoading(false);
     }
   }, []);
+
+  // ── Spotify helpers ───────────────────────────────────────────────────────────
+
+  /** Get a valid access token, refreshing if expired. */
+  const getSpotifyToken = useCallback(async (tokens: SpotifyTokens): Promise<string | null> => {
+    if (Date.now() < tokens.expiresAt - 60_000) return tokens.accessToken;
+    const storedClientId = loadFromStorage<string>("spotify_client_id", "");
+    try {
+      const res = await fetch("/api/spotify/callback", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refreshToken: tokens.refreshToken, clientId: storedClientId }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      const refreshed: SpotifyTokens = {
+        accessToken: data.access_token,
+        refreshToken: data.refresh_token ?? tokens.refreshToken,
+        expiresAt: Date.now() + data.expires_in * 1000,
+      };
+      setSpotifyTokens(refreshed);
+      saveToStorage("spotify_tokens", refreshed);
+      return refreshed.accessToken;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  /** Kick off the PKCE authorization flow. */
+  const connectSpotify = useCallback(async (clientId: string) => {
+    if (!clientId.trim()) return;
+    setSpotifyConnecting(true);
+    setSpotifyError("");
+    const verifier = generateCodeVerifier();
+    const challenge = await generateCodeChallenge(verifier);
+    const state = Math.random().toString(36).slice(2);
+    const redirectUri = `${window.location.origin}${window.location.pathname}`;
+    saveToStorage("spotify_pkce", { verifier, state, clientId: clientId.trim() });
+    saveToStorage("spotify_client_id", clientId.trim());
+    window.location.href = buildAuthUrl(clientId.trim(), redirectUri, challenge, state);
+  }, []);
+
+  /** Handle the redirect back from Spotify with ?code=... */
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("code");
+    const state = params.get("state");
+    if (!code) return;
+
+    const pkce = loadFromStorage<{ verifier: string; state: string; clientId: string } | null>(
+      "spotify_pkce",
+      null
+    );
+    if (!pkce || pkce.state !== state) return;
+
+    // Clean the URL immediately so a page refresh doesn't re-trigger
+    window.history.replaceState({}, "", window.location.pathname);
+    localStorage.removeItem("spotify_pkce");
+
+    const redirectUri = `${window.location.origin}${window.location.pathname}`;
+    (async () => {
+      try {
+        const res = await fetch("/api/spotify/callback", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code, codeVerifier: pkce.verifier, redirectUri, clientId: pkce.clientId }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error);
+        const tokens: SpotifyTokens = {
+          accessToken: data.access_token,
+          refreshToken: data.refresh_token,
+          expiresAt: Date.now() + data.expires_in * 1000,
+        };
+        setSpotifyTokens(tokens);
+        saveToStorage("spotify_tokens", tokens);
+        setView("spotify");
+      } catch (e) {
+        setSpotifyError(e instanceof Error ? e.message : "Spotify auth failed");
+      } finally {
+        setSpotifyConnecting(false);
+      }
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** Fetch top tracks for a given time range and collapse to albums. */
+  const fetchSpotifyTop = useCallback(async (tokens: SpotifyTokens, timeRange: SpotifyTimeRange) => {
+    setSpotifyTopLoading(true);
+    setSpotifyError("");
+    try {
+      const token = await getSpotifyToken(tokens);
+      if (!token) throw new Error("Could not get Spotify access token");
+
+      const res = await fetch(
+        `/api/spotify/top?access_token=${encodeURIComponent(token)}&type=tracks&time_range=${timeRange}&limit=50`
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to fetch top tracks");
+
+      const albums = tracksToAlbums((data.items as SpotifyTrack[]) ?? []);
+      setSpotifyTopAlbums(albums);
+      saveToStorage("spotify_top_albums", albums);
+    } catch (e) {
+      setSpotifyError(e instanceof Error ? e.message : "Unknown error");
+    } finally {
+      setSpotifyTopLoading(false);
+    }
+  }, [getSpotifyToken]);
+
+  /** Fetch the user's Spotify playlists. */
+  const fetchSpotifyPlaylists = useCallback(async (tokens: SpotifyTokens) => {
+    setSpotifyPlaylistsLoading(true);
+    setSpotifyError("");
+    try {
+      const token = await getSpotifyToken(tokens);
+      if (!token) throw new Error("Could not get Spotify access token");
+
+      const res = await fetch(
+        `/api/spotify/playlists?access_token=${encodeURIComponent(token)}&limit=50`
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to fetch playlists");
+
+      setSpotifyPlaylists(data.items ?? []);
+      saveToStorage("spotify_playlists", data.items ?? []);
+    } catch (e) {
+      setSpotifyError(e instanceof Error ? e.message : "Unknown error");
+    } finally {
+      setSpotifyPlaylistsLoading(false);
+    }
+  }, [getSpotifyToken]);
+
+  /** Fetch all tracks from a playlist and collapse to albums. */
+  const fetchSpotifyPlaylistTracks = useCallback(async (tokens: SpotifyTokens, playlistId: string) => {
+    setSpotifyPlaylistLoading(true);
+    setSpotifyError("");
+    try {
+      const token = await getSpotifyToken(tokens);
+      if (!token) throw new Error("Could not get Spotify access token");
+
+      const allTracks: SpotifyTrack[] = [];
+      let offset = 0;
+      const limit = 50;
+
+      while (true) {
+        const res = await fetch(
+          `/api/spotify/playlists?access_token=${encodeURIComponent(token)}&playlist_id=${playlistId}&limit=${limit}&offset=${offset}`
+        );
+        const data: SpotifyPlaylistTracksResponse = await res.json();
+        if (!res.ok) throw new Error((data as unknown as { error: string }).error || "Failed to fetch playlist tracks");
+
+        for (const item of data.items) {
+          if (item.track) allTracks.push(item.track);
+        }
+        if (!data.next) break;
+        offset += limit;
+      }
+
+      setSpotifyPlaylistAlbums(tracksToAlbums(allTracks));
+    } catch (e) {
+      setSpotifyError(e instanceof Error ? e.message : "Unknown error");
+    } finally {
+      setSpotifyPlaylistLoading(false);
+    }
+  }, [getSpotifyToken]);
+
+  /** Match Spotify albums against the Discogs collection using the same fuzzy logic. */
+  const matchSpotifyAlbum = useCallback((album: SpotifyAlbum): DiscogsRelease | undefined => {
+    const normAlbum = normalizeStr(album.name);
+    return releases.find((r) => {
+      const info = r.basic_information;
+      const artistMatch = album.artists.some((sa) => {
+        const normSA = normalizeArtist(sa.name);
+        return info.artists.some((da) => {
+          const normDA = normalizeArtist(da.name);
+          return normDA === normSA || normDA.includes(normSA) || normSA.includes(normDA);
+        });
+      });
+      if (!artistMatch) return false;
+      const na = normalizeStr(info.title);
+      return na === normAlbum || na.includes(normAlbum) || normAlbum.includes(na);
+    });
+  }, [releases]);
 
   // active playlist helper
   const activePlaylist = playlists.find((p) => p.id === activePlaylistId) ?? null;
@@ -567,13 +783,15 @@ export default function Home() {
 
       {/* nav tabs */}
       <div className="flex shrink-0 gap-1 border-b border-zinc-800 bg-zinc-900 px-4">
-          {(["collection", "playlists", "rs500"] as View[]).map((v) => (
+        {(["collection", "playlists", "rs500", "spotify"] as View[]).map((v) => (
           <button
             key={v}
             onClick={() => setView(v)}
             className={`border-b-2 px-4 py-2 text-sm font-medium transition-colors ${
               view === v
-                ? "border-amber-500 text-amber-400"
+                ? v === "spotify"
+                  ? "border-green-500 text-green-400"
+                  : "border-amber-500 text-amber-400"
                 : "border-transparent text-zinc-400 hover:text-zinc-200"
             }`}
           >
@@ -591,6 +809,11 @@ export default function Home() {
             {v === "rs500" && rs500Matches.size > 0 && (
               <span className="ml-2 rounded-full bg-green-900 px-1.5 py-0.5 text-xs text-green-300">
                 {rs500Matches.size}
+              </span>
+            )}
+            {v === "spotify" && spotifyTokens && (
+              <span className="ml-2 rounded-full bg-green-900 px-1.5 py-0.5 text-xs text-green-300">
+                ✓
               </span>
             )}
           </button>
@@ -919,6 +1142,300 @@ export default function Home() {
               ))}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* ── spotify view ─────────────────────────────────────────────────────── */}
+      {view === "spotify" && (
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          {!spotifyTokens ? (
+            /* ── connect screen ── */
+            <div className="flex flex-1 items-center justify-center px-4">
+              <div className="w-full max-w-md rounded-2xl border border-zinc-800 bg-zinc-900 p-8">
+                <div className="mb-4 flex items-center gap-3">
+                  <span className="text-2xl font-bold">Connect Spotify</span>
+                </div>
+                <p className="mb-6 text-sm text-zinc-400">
+                  See which albums from your Spotify listening you own on vinyl.
+                  You need a free Spotify app Client ID — create one at{" "}
+                  <span className="text-green-400">developer.spotify.com/dashboard</span>
+                  {" "}(add <span className="font-mono text-xs text-zinc-300">{typeof window !== "undefined" ? window.location.origin + window.location.pathname : ""}</span> as a Redirect URI).
+                </p>
+                {spotifyError && (
+                  <p className="mb-4 rounded-lg bg-red-950 p-3 text-sm text-red-300">{spotifyError}</p>
+                )}
+                <div className="space-y-4">
+                  <div>
+                    <label className="mb-1 block text-sm font-medium text-zinc-300">
+                      Spotify Client ID
+                    </label>
+                    <input
+                      type="text"
+                      value={spotifyClientId}
+                      onChange={(e) => setSpotifyClientId(e.target.value)}
+                      placeholder="e.g. 4b3f…"
+                      className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 font-mono text-sm text-zinc-100 placeholder-zinc-500 focus:border-green-500 focus:outline-none"
+                    />
+                  </div>
+                  <button
+                    onClick={() => connectSpotify(spotifyClientId)}
+                    disabled={!spotifyClientId.trim() || spotifyConnecting}
+                    className="w-full rounded-lg bg-green-600 py-2.5 font-semibold text-white transition-colors hover:bg-green-500 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {spotifyConnecting ? "Connecting…" : "Connect with Spotify"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : (
+            /* ── connected: top / playlists ── */
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+              {/* toolbar */}
+              <div className="shrink-0 border-b border-zinc-800 bg-zinc-950 px-4 py-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  {/* mode toggle */}
+                  <div className="flex rounded-lg border border-zinc-700 p-0.5">
+                    {(["top", "playlists"] as SpotifyViewMode[]).map((m) => (
+                      <button
+                        key={m}
+                        onClick={() => setSpotifyViewMode(m)}
+                        className={`rounded-md px-3 py-1 text-sm font-medium transition-colors ${
+                          spotifyViewMode === m
+                            ? "bg-green-600 text-white"
+                            : "text-zinc-400 hover:text-zinc-200"
+                        }`}
+                      >
+                        {m === "top" ? "Top Tracks" : "Playlists"}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* time range (top mode only) */}
+                  {spotifyViewMode === "top" && (
+                    <div className="flex rounded-lg border border-zinc-700 p-0.5">
+                      {([
+                        ["long_term", "All time"],
+                        ["medium_term", "6 months"],
+                        ["short_term", "4 weeks"],
+                      ] as [SpotifyTimeRange, string][]).map(([range, label]) => (
+                        <button
+                          key={range}
+                          onClick={() => {
+                            setSpotifyTimeRange(range);
+                            fetchSpotifyTop(spotifyTokens, range);
+                          }}
+                          className={`rounded-md px-3 py-1 text-sm transition-colors ${
+                            spotifyTimeRange === range
+                              ? "bg-zinc-700 text-zinc-100"
+                              : "text-zinc-400 hover:text-zinc-200"
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* refresh buttons */}
+                  {spotifyViewMode === "top" && (
+                    <button
+                      onClick={() => fetchSpotifyTop(spotifyTokens, spotifyTimeRange)}
+                      disabled={spotifyTopLoading}
+                      className="ml-auto rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:border-zinc-500 disabled:opacity-50"
+                    >
+                      {spotifyTopLoading ? "Loading…" : spotifyTopAlbums.length ? "Refresh" : "Load Top Tracks"}
+                    </button>
+                  )}
+                  {spotifyViewMode === "playlists" && (
+                    <button
+                      onClick={() => fetchSpotifyPlaylists(spotifyTokens)}
+                      disabled={spotifyPlaylistsLoading}
+                      className="ml-auto rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:border-zinc-500 disabled:opacity-50"
+                    >
+                      {spotifyPlaylistsLoading ? "Loading…" : spotifyPlaylists.length ? "Refresh" : "Load Playlists"}
+                    </button>
+                  )}
+
+                  {/* disconnect */}
+                  <button
+                    onClick={() => {
+                      localStorage.removeItem("spotify_tokens");
+                      localStorage.removeItem("spotify_top_albums");
+                      localStorage.removeItem("spotify_playlists");
+                      localStorage.removeItem("spotify_client_id");
+                      setSpotifyTokens(null);
+                      setSpotifyTopAlbums([]);
+                      setSpotifyPlaylists([]);
+                      setSpotifyClientId("");
+                    }}
+                    className="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-400 hover:border-zinc-500"
+                  >
+                    Disconnect
+                  </button>
+                </div>
+                {spotifyError && (
+                  <p className="mt-2 text-xs text-red-400">{spotifyError}</p>
+                )}
+              </div>
+
+              {/* ── top tracks albums view ── */}
+              {spotifyViewMode === "top" && (
+                <div className="flex-1 overflow-y-auto p-4">
+                  {spotifyTopAlbums.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-24 text-zinc-500">
+                      <p className="mb-3">Load your top tracks to see which albums you own on vinyl.</p>
+                      <button
+                        onClick={() => fetchSpotifyTop(spotifyTokens, spotifyTimeRange)}
+                        disabled={spotifyTopLoading}
+                        className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-500 disabled:opacity-50"
+                      >
+                        {spotifyTopLoading ? "Loading…" : "Load Top Tracks"}
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                      {spotifyTopAlbums.map((album) => {
+                        const discogsMatch = matchSpotifyAlbum(album);
+                        const artistStr = album.artists.map((a) => a.name).join(", ");
+                        return (
+                          <div
+                            key={album.id}
+                            className={`flex items-center gap-3 rounded-lg border p-3 transition-colors ${
+                              discogsMatch
+                                ? "border-green-800 bg-green-950/30"
+                                : "border-zinc-800 bg-zinc-900"
+                            }`}
+                          >
+                            {album.image ? (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img
+                                src={album.image}
+                                alt={album.name}
+                                className="h-12 w-12 shrink-0 rounded object-cover"
+                              />
+                            ) : (
+                              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded bg-zinc-800 text-xl text-zinc-600">
+                                ♪
+                              </div>
+                            )}
+                            <div className="min-w-0 flex-1">
+                              <p className="truncate font-semibold text-zinc-100">{album.name}</p>
+                              <p className="truncate text-sm text-zinc-400">{artistStr}</p>
+                              <p className="text-xs text-zinc-600">
+                                {album.trackCount} top track{album.trackCount !== 1 ? "s" : ""}
+                                {album.releaseYear ? ` · ${album.releaseYear}` : ""}
+                              </p>
+                            </div>
+                            {discogsMatch ? (
+                              <span className="shrink-0 rounded-full bg-green-900 px-2 py-0.5 text-xs font-medium text-green-300">
+                                Owned
+                              </span>
+                            ) : (
+                              <span className="shrink-0 rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-500">
+                                Not owned
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ── playlists view ── */}
+              {spotifyViewMode === "playlists" && (
+                <div className="flex min-h-0 flex-1 overflow-hidden">
+                  {/* sidebar */}
+                  <aside className="w-56 shrink-0 overflow-y-auto border-r border-zinc-800 bg-zinc-900 p-3">
+                    {spotifyPlaylists.length === 0 ? (
+                      <p className="text-sm text-zinc-500">
+                        {spotifyPlaylistsLoading ? "Loading…" : "No playlists loaded yet."}
+                      </p>
+                    ) : (
+                      spotifyPlaylists.map((pl) => (
+                        <button
+                          key={pl.id}
+                          onClick={() => {
+                            setActiveSpotifyPlaylistId(pl.id);
+                            fetchSpotifyPlaylistTracks(spotifyTokens, pl.id);
+                          }}
+                          className={`mb-1 w-full rounded-lg px-3 py-2 text-left transition-colors ${
+                            activeSpotifyPlaylistId === pl.id
+                              ? "bg-green-700 text-white"
+                              : "text-zinc-300 hover:bg-zinc-800"
+                          }`}
+                        >
+                          <p className="truncate text-sm font-medium">{pl.name}</p>
+                          <p className={`text-xs ${activeSpotifyPlaylistId === pl.id ? "text-green-200" : "text-zinc-500"}`}>
+                            {pl.tracks.total} tracks
+                          </p>
+                        </button>
+                      ))
+                    )}
+                  </aside>
+
+                  {/* playlist album grid */}
+                  <div className="flex-1 overflow-y-auto p-4">
+                    {!activeSpotifyPlaylistId ? (
+                      <p className="py-16 text-center text-zinc-500">Select a playlist to see which albums you own.</p>
+                    ) : spotifyPlaylistLoading ? (
+                      <p className="py-16 text-center text-zinc-500">Loading tracks…</p>
+                    ) : spotifyPlaylistAlbums.length === 0 ? (
+                      <p className="py-16 text-center text-zinc-500">No tracks found in this playlist.</p>
+                    ) : (
+                      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                        {spotifyPlaylistAlbums.map((album) => {
+                          const discogsMatch = matchSpotifyAlbum(album);
+                          const artistStr = album.artists.map((a) => a.name).join(", ");
+                          return (
+                            <div
+                              key={album.id}
+                              className={`flex items-center gap-3 rounded-lg border p-3 transition-colors ${
+                                discogsMatch
+                                  ? "border-green-800 bg-green-950/30"
+                                  : "border-zinc-800 bg-zinc-900"
+                              }`}
+                            >
+                              {album.image ? (
+                                // eslint-disable-next-line @next/next/no-img-element
+                                <img
+                                  src={album.image}
+                                  alt={album.name}
+                                  className="h-12 w-12 shrink-0 rounded object-cover"
+                                />
+                              ) : (
+                                <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded bg-zinc-800 text-xl text-zinc-600">
+                                  ♪
+                                </div>
+                              )}
+                              <div className="min-w-0 flex-1">
+                                <p className="truncate font-semibold text-zinc-100">{album.name}</p>
+                                <p className="truncate text-sm text-zinc-400">{artistStr}</p>
+                                <p className="text-xs text-zinc-600">
+                                  {album.trackCount} track{album.trackCount !== 1 ? "s" : ""}
+                                  {album.releaseYear ? ` · ${album.releaseYear}` : ""}
+                                </p>
+                              </div>
+                              {discogsMatch ? (
+                                <span className="shrink-0 rounded-full bg-green-900 px-2 py-0.5 text-xs font-medium text-green-300">
+                                  Owned
+                                </span>
+                              ) : (
+                                <span className="shrink-0 rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-500">
+                                  Not owned
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
