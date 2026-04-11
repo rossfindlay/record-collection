@@ -572,9 +572,31 @@ export default function Home() {
           { headers: { Authorization: `Bearer ${token}` } }
         );
         const data: SpotifyPlaylistTracksResponse = await res.json();
-        if (!res.ok) throw new Error(
-          (data as unknown as { error?: { message?: string } })?.error?.message || "Failed to fetch playlist tracks"
-        );
+        if (!res.ok) {
+          const errData = data as unknown as { error?: { status?: number; message?: string } };
+          const spotifyMsg = errData?.error?.message ?? "Unknown error";
+
+          if (res.status === 403) {
+            // Probe /v1/me to distinguish "bad token / app config" from
+            // "this specific playlist is restricted".
+            const meRes = await fetch("https://api.spotify.com/v1/me", {
+              headers: { Authorization: `Bearer ${token}` },
+            });
+            if (!meRes.ok) {
+              throw new Error(
+                `Spotify access denied (403 — token/app issue: "${spotifyMsg}"). ` +
+                "In your Spotify Developer Dashboard, open the app → Settings → User Management and add your Spotify account email address, then disconnect and reconnect here."
+              );
+            }
+            // Token is valid; the playlist itself is restricted.
+            throw new Error(
+              `Spotify denied access to this playlist (403: "${spotifyMsg}"). ` +
+              "Spotify-generated playlists such as Discover Weekly and Daily Mixes block API access. Try a playlist you created yourself."
+            );
+          }
+
+          throw new Error(`Spotify error ${res.status}: ${spotifyMsg}`);
+        }
 
         for (const item of data.items ?? []) {
           if (item.track) allTracks.push(item.track);
