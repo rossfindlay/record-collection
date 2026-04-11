@@ -235,7 +235,7 @@ function RS500Row({
 
 type View = "collection" | "playlists" | "rs500" | "spotify";
 type SpotifyTimeRange = "long_term" | "medium_term" | "short_term";
-type SpotifyViewMode = "top" | "playlists";
+type SpotifyViewMode = "tracks" | "top" | "playlists";
 
 export default function Home() {
   // credentials
@@ -266,8 +266,9 @@ export default function Home() {
   const [spotifyClientId, setSpotifyClientId] = useState("");
   const [spotifyConnecting, setSpotifyConnecting] = useState(false);
   const [spotifyError, setSpotifyError] = useState("");
-  const [spotifyViewMode, setSpotifyViewMode] = useState<SpotifyViewMode>("top");
+  const [spotifyViewMode, setSpotifyViewMode] = useState<SpotifyViewMode>("tracks");
   const [spotifyTimeRange, setSpotifyTimeRange] = useState<SpotifyTimeRange>("long_term");
+  const [spotifyTopTracks, setSpotifyTopTracks] = useState<SpotifyTrack[]>([]);
   const [spotifyTopAlbums, setSpotifyTopAlbums] = useState<SpotifyAlbum[]>([]);
   const [spotifyTopLoading, setSpotifyTopLoading] = useState(false);
   const [spotifyPlaylists, setSpotifyPlaylists] = useState<SpotifyPlaylist[]>([]);
@@ -290,6 +291,7 @@ export default function Home() {
     setWantlist(loadFromStorage("discogs_wantlist", []));
     setSpotifyTokens(loadFromStorage("spotify_tokens", null));
     setSpotifyClientId(loadFromStorage("spotify_client_id", ""));
+    setSpotifyTopTracks(loadFromStorage("spotify_top_tracks", []));
     setSpotifyTopAlbums(loadFromStorage("spotify_top_albums", []));
     setSpotifyPlaylists(loadFromStorage("spotify_playlists", []));
   }, []);
@@ -485,8 +487,11 @@ export default function Home() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to fetch top tracks");
 
-      const albums = tracksToAlbums((data.items as SpotifyTrack[]) ?? []);
+      const tracks = (data.items as SpotifyTrack[]) ?? [];
+      const albums = tracksToAlbums(tracks);
+      setSpotifyTopTracks(tracks);
       setSpotifyTopAlbums(albums);
+      saveToStorage("spotify_top_tracks", tracks);
       saveToStorage("spotify_top_albums", albums);
     } catch (e) {
       setSpotifyError(e instanceof Error ? e.message : "Unknown error");
@@ -1195,7 +1200,11 @@ export default function Home() {
                 <div className="flex flex-wrap items-center gap-2">
                   {/* mode toggle */}
                   <div className="flex rounded-lg border border-zinc-700 p-0.5">
-                    {(["top", "playlists"] as SpotifyViewMode[]).map((m) => (
+                    {([
+                      ["tracks", "Top Tracks"],
+                      ["top", "Top Albums"],
+                      ["playlists", "Playlists"],
+                    ] as [SpotifyViewMode, string][]).map(([m, label]) => (
                       <button
                         key={m}
                         onClick={() => setSpotifyViewMode(m)}
@@ -1205,13 +1214,13 @@ export default function Home() {
                             : "text-zinc-400 hover:text-zinc-200"
                         }`}
                       >
-                        {m === "top" ? "Top Tracks" : "Playlists"}
+                        {label}
                       </button>
                     ))}
                   </div>
 
-                  {/* time range (top mode only) */}
-                  {spotifyViewMode === "top" && (
+                  {/* time range (tracks or albums mode) */}
+                  {(spotifyViewMode === "tracks" || spotifyViewMode === "top") && (
                     <div className="flex rounded-lg border border-zinc-700 p-0.5">
                       {([
                         ["long_term", "All time"],
@@ -1237,13 +1246,13 @@ export default function Home() {
                   )}
 
                   {/* refresh buttons */}
-                  {spotifyViewMode === "top" && (
+                  {(spotifyViewMode === "tracks" || spotifyViewMode === "top") && (
                     <button
                       onClick={() => fetchSpotifyTop(spotifyTokens, spotifyTimeRange)}
                       disabled={spotifyTopLoading}
                       className="ml-auto rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:border-zinc-500 disabled:opacity-50"
                     >
-                      {spotifyTopLoading ? "Loading…" : spotifyTopAlbums.length ? "Refresh" : "Load Top Tracks"}
+                      {spotifyTopLoading ? "Loading…" : spotifyTopTracks.length ? "Refresh" : "Load Top Tracks"}
                     </button>
                   )}
                   {spotifyViewMode === "playlists" && (
@@ -1260,10 +1269,12 @@ export default function Home() {
                   <button
                     onClick={() => {
                       localStorage.removeItem("spotify_tokens");
+                      localStorage.removeItem("spotify_top_tracks");
                       localStorage.removeItem("spotify_top_albums");
                       localStorage.removeItem("spotify_playlists");
                       localStorage.removeItem("spotify_client_id");
                       setSpotifyTokens(null);
+                      setSpotifyTopTracks([]);
                       setSpotifyTopAlbums([]);
                       setSpotifyPlaylists([]);
                       setSpotifyClientId("");
@@ -1278,7 +1289,77 @@ export default function Home() {
                 )}
               </div>
 
-              {/* ── top tracks albums view ── */}
+              {/* ── top tracks list ── */}
+              {spotifyViewMode === "tracks" && (
+                <div className="flex-1 overflow-y-auto p-4">
+                  {spotifyTopTracks.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-24 text-zinc-500">
+                      <p className="mb-3">Load your top tracks to see which ones you own on vinyl.</p>
+                      <button
+                        onClick={() => fetchSpotifyTop(spotifyTokens, spotifyTimeRange)}
+                        disabled={spotifyTopLoading}
+                        className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-500 disabled:opacity-50"
+                      >
+                        {spotifyTopLoading ? "Loading…" : "Load Top Tracks"}
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-1.5">
+                      {spotifyTopTracks.map((track, i) => {
+                        const discogsMatch = matchSpotifyAlbum({
+                          id: track.album.id,
+                          name: track.album.name,
+                          artists: track.album.artists,
+                          image: track.album.images?.[0]?.url ?? "",
+                          releaseYear: parseInt(track.album.release_date?.slice(0, 4) ?? "0", 10),
+                          trackCount: 1,
+                        });
+                        const artistStr = track.artists.map((a) => a.name).join(", ");
+                        return (
+                          <div
+                            key={track.id}
+                            className={`flex items-center gap-3 rounded-lg border px-3 py-2.5 transition-colors ${
+                              discogsMatch
+                                ? "border-green-800 bg-green-950/30"
+                                : "border-zinc-800 bg-zinc-900"
+                            }`}
+                          >
+                            <span className="w-6 shrink-0 text-right font-mono text-xs text-zinc-600">
+                              {i + 1}
+                            </span>
+                            {track.album.images?.[0]?.url ? (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img
+                                src={track.album.images[0].url}
+                                alt={track.album.name}
+                                className="h-10 w-10 shrink-0 rounded object-cover"
+                              />
+                            ) : (
+                              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded bg-zinc-800 text-xl text-zinc-600">
+                                ♪
+                              </div>
+                            )}
+                            <div className="min-w-0 flex-1">
+                              <p className="truncate font-semibold text-zinc-100">{track.name}</p>
+                              <p className="truncate text-sm text-zinc-400">
+                                {artistStr}
+                                <span className="text-zinc-600"> · {track.album.name}</span>
+                              </p>
+                            </div>
+                            {discogsMatch && (
+                              <span className="shrink-0 rounded-full bg-green-900 px-2 py-0.5 text-xs font-medium text-green-300">
+                                Owned
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ── top albums view ── */}
               {spotifyViewMode === "top" && (
                 <div className="flex-1 overflow-y-auto p-4">
                   {spotifyTopAlbums.length === 0 ? (
