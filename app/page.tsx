@@ -534,15 +534,16 @@ export default function Home() {
       const allTracks: SpotifyTrack[] = [];
       let offset = 0;
       const limit = 50;
+      const MAX_PAGES = 20; // cap at 1,000 tracks to avoid OOM on very large playlists
 
-      while (true) {
+      for (let page = 0; page < MAX_PAGES; page++) {
         const res = await fetch(
           `/api/spotify/playlists?access_token=${encodeURIComponent(token)}&playlist_id=${playlistId}&limit=${limit}&offset=${offset}`
         );
         const data: SpotifyPlaylistTracksResponse = await res.json();
         if (!res.ok) throw new Error((data as unknown as { error: string }).error || "Failed to fetch playlist tracks");
 
-        for (const item of data.items) {
+        for (const item of data.items ?? []) {
           if (item.track) allTracks.push(item.track);
         }
         if (!data.next) break;
@@ -1449,7 +1450,7 @@ export default function Home() {
                         >
                           <p className="truncate text-sm font-medium">{pl.name}</p>
                           <p className={`text-xs ${activeSpotifyPlaylistId === pl.id ? "text-green-200" : "text-zinc-500"}`}>
-                            {pl.tracks.total} tracks
+                            {pl.tracks?.total ?? "?"} tracks
                           </p>
                         </button>
                       ))

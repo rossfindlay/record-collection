@@ -82,7 +82,7 @@ export interface SpotifyPlaylist {
   name: string;
   description: string;
   images: Array<{ url: string }>;
-  tracks: { total: number };
+  tracks: { total: number } | null;
   owner: { display_name: string };
 }
 
