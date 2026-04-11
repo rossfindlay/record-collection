@@ -555,7 +555,15 @@ export default function Home() {
           `/api/spotify/playlists?access_token=${encodeURIComponent(token)}&playlist_id=${playlistId}&limit=${limit}&offset=${offset}`
         );
         const data: SpotifyPlaylistTracksResponse = await res.json();
-        if (!res.ok) throw new Error((data as unknown as { error: string }).error || "Failed to fetch playlist tracks");
+        if (!res.ok) {
+          const errData = data as unknown as { error: string; spotifyStatus?: number };
+          if (res.status === 403) {
+            throw new Error(
+              "Spotify denied access to this playlist (403). Your connection may be using outdated permissions — try disconnecting and reconnecting Spotify."
+            );
+          }
+          throw new Error(errData.error || "Failed to fetch playlist tracks");
+        }
 
         for (const item of data.items ?? []) {
           if (item.track) allTracks.push(item.track);

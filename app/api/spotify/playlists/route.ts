@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 
+export const dynamic = "force-dynamic";
+
 // Proxies GET /me/playlists or /playlists/{id}/tracks from Spotify.
 export async function GET(req: NextRequest) {
-  const { searchParams } = new URL(req.url);
+  const searchParams = req.nextUrl.searchParams;
   const accessToken = searchParams.get("access_token");
   const playlistId = searchParams.get("playlist_id"); // if provided, fetch tracks
   const limit = searchParams.get("limit") || "50";
@@ -13,7 +15,7 @@ export async function GET(req: NextRequest) {
   }
 
   const url = playlistId
-    ? `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=${limit}&offset=${offset}`
+    ? `https://api.spotify.com/v1/playlists/${encodeURIComponent(playlistId)}/tracks?limit=${limit}&offset=${offset}`
     : `https://api.spotify.com/v1/me/playlists?limit=${limit}&offset=${offset}`;
 
   try {
@@ -30,7 +32,10 @@ export async function GET(req: NextRequest) {
 
     if (!res.ok) {
       return NextResponse.json(
-        { error: (data as { error?: { message?: string } })?.error?.message || "Spotify API error" },
+        {
+          error: (data as { error?: { message?: string } })?.error?.message || "Spotify API error",
+          spotifyStatus: res.status,
+        },
         { status: res.status }
       );
     }
