@@ -97,7 +97,8 @@ export interface SpotifyPlaylistsResponse {
 }
 
 export interface SpotifyPlaylistTracksResponse {
-  items: Array<{ track: SpotifyTrack | null }>;
+  // As of Feb 2026, each entry wraps the track in `item` (renamed from `track`).
+  items: Array<{ item: SpotifyTrack | null }>;
   total: number;
   next: string | null;
   offset: number;

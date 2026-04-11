@@ -591,8 +591,12 @@ export default function Home() {
       const MAX_PAGES = 20; // cap at 1,000 tracks to avoid OOM on very large playlists
 
       for (let page = 0; page < MAX_PAGES; page++) {
+        // Feb 2026 API migration: /tracks was removed in favour of /items, and
+        // each entry's `track` field was renamed to `item`. Playlist contents
+        // are only returned for playlists the authenticated user owns or
+        // collaborates on — other users' playlists return metadata only.
         const res = await fetch(
-          `https://api.spotify.com/v1/playlists/${encodeURIComponent(playlistId)}/tracks?limit=${limit}&offset=${offset}`,
+          `https://api.spotify.com/v1/playlists/${encodeURIComponent(playlistId)}/items?limit=${limit}&offset=${offset}`,
           { headers: { Authorization: `Bearer ${token}` } }
         );
         const data: SpotifyPlaylistTracksResponse = await res.json();
@@ -612,18 +616,20 @@ export default function Home() {
                 "In your Spotify Developer Dashboard, open the app → Settings → User Management and add your Spotify account email address, then disconnect and reconnect here."
               );
             }
-            // Token is valid; the playlist itself is restricted.
+            // Token is valid; the playlist itself is restricted. As of Feb
+            // 2026, Spotify only returns contents for playlists the user owns
+            // or collaborates on.
             throw new Error(
               `Spotify denied access to this playlist (403: "${spotifyMsg}"). ` +
-              "Spotify-generated playlists such as Discover Weekly and Daily Mixes block API access. Try a playlist you created yourself."
+              "Since February 2026, Spotify only exposes contents for playlists you own or collaborate on — editorial/algorithmic playlists and playlists owned by other users are blocked."
             );
           }
 
           throw new Error(`Spotify error ${res.status}: ${spotifyMsg}`);
         }
 
-        for (const item of data.items ?? []) {
-          if (item.track) allTracks.push(item.track);
+        for (const entry of data.items ?? []) {
+          if (entry.item) allTracks.push(entry.item);
         }
         if (!data.next) break;
         offset += limit;
