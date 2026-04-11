@@ -94,7 +94,11 @@ function loadFromStorage<T>(key: string, fallback: T): T {
 
 function saveToStorage(key: string, value: unknown) {
   if (typeof window === "undefined") return;
-  localStorage.setItem(key, JSON.stringify(value));
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Silently ignore storage errors (e.g. QuotaExceededError for large datasets)
+  }
 }
 
 function uid() {

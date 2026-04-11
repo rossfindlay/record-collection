@@ -13,7 +13,7 @@ export async function GET(req: NextRequest) {
   }
 
   const url = playlistId
-    ? `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=${limit}&offset=${offset}&fields=items(track(name,artists,album)),next,total,offset,limit`
+    ? `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=${limit}&offset=${offset}`
     : `https://api.spotify.com/v1/me/playlists?limit=${limit}&offset=${offset}`;
 
   try {
