@@ -73,6 +73,102 @@ function buildRS500WantlistMatches(wantlist: DiscogsWantlistItem[]): Map<number,
   return result;
 }
 
+// ── recommendation engine ─────────────────────────────────────────────────────
+
+type Recommendation = { release: DiscogsRelease; reason: string; score: number };
+
+function getRecommendations(
+  current: DiscogsRelease,
+  allReleases: DiscogsRelease[],
+  playlists: Playlist[],
+  limit = 8
+): Recommendation[] {
+  const info = current.basic_information;
+  const currentArtistNames = new Set(
+    info.artists.map((a) => normalizeArtist(a.name))
+  );
+  const currentStyles = new Set(info.styles);
+  const currentLabel = info.labels[0]?.name ?? "";
+  const currentDecade = info.year ? Math.floor(info.year / 10) : null;
+
+  // Map each release's basic_information.id → set of playlist IDs it belongs to
+  const releasePlaylistMap = new Map<number, Set<string>>();
+  for (const pl of playlists) {
+    for (const id of pl.releaseIds) {
+      if (!releasePlaylistMap.has(id)) releasePlaylistMap.set(id, new Set());
+      releasePlaylistMap.get(id)!.add(pl.id);
+    }
+  }
+  const currentPlaylists = releasePlaylistMap.get(info.id) ?? new Set<string>();
+
+  const results: Recommendation[] = [];
+
+  for (const r of allReleases) {
+    if (r.instance_id === current.instance_id) continue;
+    const ri = r.basic_information;
+
+    let score = 0;
+    const reasons: string[] = [];
+
+    // Same artist (+100)
+    const sameArtist = ri.artists.some((a) =>
+      currentArtistNames.has(normalizeArtist(a.name))
+    );
+    if (sameArtist) {
+      score += 100;
+      reasons.push("Same artist");
+    }
+
+    // Style overlap (+20 each)
+    const sharedStyles = ri.styles.filter((s) => currentStyles.has(s));
+    if (sharedStyles.length > 0) {
+      score += sharedStyles.length * 20;
+      reasons.push(
+        sharedStyles.length === 1
+          ? `Shared style: ${sharedStyles[0]}`
+          : `${sharedStyles.length} shared styles`
+      );
+    }
+
+    // Playlist co-occurrence (+25 per shared playlist)
+    const rPlaylists = releasePlaylistMap.get(ri.id) ?? new Set<string>();
+    const sharedPlaylistCount = [...rPlaylists].filter((id) =>
+      currentPlaylists.has(id)
+    ).length;
+    if (sharedPlaylistCount > 0) {
+      score += sharedPlaylistCount * 25;
+      reasons.push(
+        sharedPlaylistCount === 1
+          ? "Same playlist"
+          : `${sharedPlaylistCount} shared playlists`
+      );
+    }
+
+    // Same label (+15)
+    const rLabel = ri.labels[0]?.name ?? "";
+    if (currentLabel && rLabel && currentLabel === rLabel) {
+      score += 15;
+      reasons.push(`Same label: ${currentLabel}`);
+    }
+
+    // Same decade (+10)
+    if (
+      currentDecade !== null &&
+      ri.year &&
+      Math.floor(ri.year / 10) === currentDecade
+    ) {
+      score += 10;
+      reasons.push(`Same era (${currentDecade * 10}s)`);
+    }
+
+    if (score > 0) {
+      results.push({ release: r, reason: reasons[0], score });
+    }
+  }
+
+  return results.sort((a, b) => b.score - a.score).slice(0, limit);
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 function getGenres(releases: DiscogsRelease[]): string[] {
@@ -111,21 +207,28 @@ function RecordCard({
   release,
   inPlaylist,
   onToggle,
+  onSelect,
+  isNowPlaying,
 }: {
   release: DiscogsRelease;
   inPlaylist: boolean;
   onToggle: () => void;
+  onSelect?: () => void;
+  isNowPlaying?: boolean;
 }) {
   const info = release.basic_information;
   const artist = info.artists.map((a) => a.name.replace(/ \(\d+\)$/, "")).join(", ");
 
   return (
     <div
+      onClick={onSelect}
       className={`flex gap-3 rounded-lg border p-3 transition-colors ${
-        inPlaylist
+        isNowPlaying
+          ? "border-amber-400 bg-amber-950/40 ring-1 ring-amber-500/30"
+          : inPlaylist
           ? "border-amber-500 bg-amber-950/30"
           : "border-zinc-800 bg-zinc-900 hover:border-zinc-600"
-      }`}
+      } ${onSelect ? "cursor-pointer" : ""}`}
     >
       {info.thumb ? (
         // eslint-disable-next-line @next/next/no-img-element
@@ -162,7 +265,7 @@ function RecordCard({
         </div>
       </div>
       <button
-        onClick={onToggle}
+        onClick={(e) => { e.stopPropagation(); onToggle(); }}
         title={inPlaylist ? "Remove from playlist" : "Add to playlist"}
         className={`shrink-0 self-center rounded-full p-2 text-lg transition-colors ${
           inPlaylist
@@ -257,6 +360,138 @@ function RS500Row({
   );
 }
 
+// ── now playing panel ─────────────────────────────────────────────────────────
+
+function NowPlayingPanel({
+  release,
+  recommendations,
+  onSelect,
+  onDismiss,
+}: {
+  release: DiscogsRelease;
+  recommendations: Recommendation[];
+  onSelect: (r: DiscogsRelease) => void;
+  onDismiss: () => void;
+}) {
+  const info = release.basic_information;
+  const artist = info.artists.map((a) => a.name.replace(/ \(\d+\)$/, "")).join(", ");
+
+  return (
+    <aside className="flex w-72 shrink-0 flex-col overflow-hidden border-l border-zinc-800 bg-zinc-950">
+      {/* header */}
+      <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 px-4 py-3">
+        <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+          Now Playing
+        </span>
+        <button
+          onClick={onDismiss}
+          className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+          title="Close"
+        >
+          ✕
+        </button>
+      </div>
+
+      <div className="flex-1 overflow-y-auto">
+        {/* album details */}
+        <div className="p-4">
+          {info.cover_image ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={info.cover_image}
+              alt={info.title}
+              className="mb-3 w-full rounded-lg object-cover"
+            />
+          ) : (
+            <div className="mb-3 flex h-40 w-full items-center justify-center rounded-lg bg-zinc-800 text-5xl">
+              ♪
+            </div>
+          )}
+          <p className="font-bold text-zinc-100 leading-tight">{info.title}</p>
+          <p className="mt-0.5 text-sm text-zinc-400">{artist}</p>
+          {info.year > 0 && (
+            <p className="mt-0.5 text-xs text-zinc-500">{info.year}</p>
+          )}
+          <div className="mt-2 flex flex-wrap gap-1">
+            {info.genres.map((g) => (
+              <span
+                key={g}
+                className="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-400"
+              >
+                {g}
+              </span>
+            ))}
+            {info.styles.slice(0, 3).map((s) => (
+              <span
+                key={s}
+                className="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-500"
+              >
+                {s}
+              </span>
+            ))}
+          </div>
+          {info.labels[0] && (
+            <p className="mt-2 text-xs text-zinc-600">
+              {info.labels[0].name}
+              {info.labels[0].catno ? ` · ${info.labels[0].catno}` : ""}
+            </p>
+          )}
+        </div>
+
+        {/* recommendations */}
+        <div className="border-t border-zinc-800 px-4 py-3">
+          <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+            Up Next
+          </p>
+          {recommendations.length === 0 ? (
+            <p className="py-4 text-center text-xs text-zinc-600">
+              No similar records found in your collection.
+            </p>
+          ) : (
+            <div className="flex flex-col gap-1.5">
+              {recommendations.map(({ release: rec, reason }) => {
+                const ri = rec.basic_information;
+                const recArtist = ri.artists
+                  .map((a) => a.name.replace(/ \(\d+\)$/, ""))
+                  .join(", ");
+                return (
+                  <button
+                    key={rec.instance_id}
+                    onClick={() => onSelect(rec)}
+                    className="flex w-full items-center gap-2.5 rounded-lg border border-zinc-800 bg-zinc-900 p-2 text-left transition-colors hover:border-zinc-600 hover:bg-zinc-800"
+                  >
+                    {ri.thumb ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={ri.thumb}
+                        alt={ri.title}
+                        className="h-10 w-10 shrink-0 rounded object-cover"
+                      />
+                    ) : (
+                      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded bg-zinc-800 text-lg">
+                        ♪
+                      </div>
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-medium text-zinc-100">
+                        {ri.title}
+                      </p>
+                      <p className="truncate text-xs text-zinc-400">{recArtist}</p>
+                      <span className="mt-0.5 inline-block rounded-full bg-amber-950 px-1.5 py-0.5 text-xs text-amber-400">
+                        {reason}
+                      </span>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+    </aside>
+  );
+}
+
 // ── main page ─────────────────────────────────────────────────────────────────
 
 type View = "collection" | "playlists" | "rs500" | "spotify";
@@ -280,6 +515,7 @@ export default function Home() {
   const [selectedGenre, setSelectedGenre] = useState<string>("All");
   const [search, setSearch] = useState("");
   const [rs500Filter, setRS500Filter] = useState<RS500Filter>("all");
+  const [nowPlaying, setNowPlaying] = useState<DiscogsRelease | null>(null);
 
   // wantlist
   const [wantlist, setWantlist] = useState<DiscogsWantlistItem[]>([]);
@@ -860,6 +1096,12 @@ export default function Home() {
     [activePlaylistId]
   );
 
+  // now playing recommendations
+  const recommendations = useMemo(
+    () => (nowPlaying ? getRecommendations(nowPlaying, releases, playlists) : []),
+    [nowPlaying, releases, playlists]
+  );
+
   // Rolling Stone 500 matching
   const rs500Matches = useMemo(() => buildRS500Matches(releases), [releases]);
   const rs500WantlistMatches = useMemo(() => buildRS500WantlistMatches(wantlist), [wantlist]);
@@ -1110,7 +1352,7 @@ export default function Home() {
               {filtered.length === 0 ? (
                 <p className="py-16 text-center text-zinc-500">No records found.</p>
               ) : (
-                <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                <div className={`grid gap-2 ${nowPlaying ? "grid-cols-1 sm:grid-cols-2" : "sm:grid-cols-2 xl:grid-cols-3"}`}>
                   {filtered.map((r) => (
                     <RecordCard
                       key={r.instance_id}
@@ -1119,12 +1361,24 @@ export default function Home() {
                         activePlaylist?.releaseIds.includes(r.basic_information.id) ?? false
                       }
                       onToggle={() => toggleRelease(r.basic_information.id)}
+                      onSelect={() => setNowPlaying(r)}
+                      isNowPlaying={nowPlaying?.instance_id === r.instance_id}
                     />
                   ))}
                 </div>
               )}
             </div>
           </div>
+
+          {/* now playing panel */}
+          {nowPlaying && (
+            <NowPlayingPanel
+              release={nowPlaying}
+              recommendations={recommendations}
+              onSelect={setNowPlaying}
+              onDismiss={() => setNowPlaying(null)}
+            />
+          )}
         </div>
       )}
       {view === "playlists" && (
