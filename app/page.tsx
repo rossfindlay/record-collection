@@ -13,6 +13,7 @@ import {
   buildAuthUrl,
   tracksToAlbums,
 } from "@/lib/spotify";
+import { apiFetch } from "@/lib/api";
 import rollingStone500 from "@/lib/rolling-stone-500.json";
 
 // ── Rolling Stone 500 helpers ─────────────────────────────────────────────────
@@ -103,7 +104,7 @@ function saveToStorage(key: string, value: unknown) {
 
 /** Persist data to the server DB (fire-and-forget, non-blocking). */
 function syncToServer(path: string, body: unknown) {
-  fetch(path, {
+  apiFetch(path, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -346,7 +347,7 @@ export default function Home() {
     // Then try to hydrate from the server DB if a session cookie exists
     (async () => {
       try {
-        const userRes = await fetch("/api/user");
+        const userRes = await apiFetch("/api/user");
         if (!userRes.ok) return; // no session — keep localStorage data
         const user = await userRes.json();
         setDbReady(true);
@@ -354,10 +355,10 @@ export default function Home() {
 
         // Fetch all server-persisted data in parallel
         const [collRes, wlRes, plRes, spRes] = await Promise.all([
-          fetch("/api/user/collection"),
-          fetch("/api/user/wantlist"),
-          fetch("/api/user/playlists"),
-          fetch("/api/user/spotify"),
+          apiFetch("/api/user/collection"),
+          apiFetch("/api/user/wantlist"),
+          apiFetch("/api/user/playlists"),
+          apiFetch("/api/user/spotify"),
         ]);
 
         if (collRes.ok) {
@@ -402,7 +403,7 @@ export default function Home() {
 
     try {
       // first page to get total
-      const firstRes = await fetch(
+      const firstRes = await apiFetch(
         `/api/discogs?username=${encodeURIComponent(user)}&token=${encodeURIComponent(tok)}&page=1&per_page=100`
       );
       const first = await firstRes.json();
@@ -414,7 +415,7 @@ export default function Home() {
       setProgress({ loaded: all.length, total });
 
       for (let p = 2; p <= pages; p++) {
-        const res = await fetch(
+        const res = await apiFetch(
           `/api/discogs?username=${encodeURIComponent(user)}&token=${encodeURIComponent(tok)}&page=${p}&per_page=100`
         );
         const data = await res.json();
@@ -430,7 +431,7 @@ export default function Home() {
 
       // Create/update server session and persist collection to DB
       try {
-        const sessionRes = await fetch("/api/user", {
+        const sessionRes = await apiFetch("/api/user", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ username: user, token: tok }),
@@ -463,7 +464,7 @@ export default function Home() {
     async function fetchPage(page: number): Promise<Response> {
       const url = `/api/discogs/wantlist?username=${encodeURIComponent(user)}&token=${encodeURIComponent(tok)}&page=${page}&per_page=100`;
       for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-        const res = await fetch(url);
+        const res = await apiFetch(url);
         if (res.status === 429) {
           // Back off for progressively longer before retrying
           await new Promise((r) => setTimeout(r, 5000 * (attempt + 1)));
@@ -797,7 +798,7 @@ export default function Home() {
     setNewPlaylistName("");
     setPlaylistModal(false);
     // Persist to server — create returns the DB-assigned id but we keep the local uid for now
-    fetch("/api/user/playlists", {
+    apiFetch("/api/user/playlists", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, releaseIds: [] }),
@@ -811,7 +812,7 @@ export default function Home() {
       return updated;
     });
     setActivePlaylistId((cur) => (cur === id ? null : cur));
-    fetch("/api/user/playlists", {
+    apiFetch("/api/user/playlists", {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id }),
@@ -827,7 +828,7 @@ export default function Home() {
 
       setAddingRanks((prev) => [...prev, entry.rank]);
       try {
-        const res = await fetch("/api/discogs/add-to-wantlist", {
+        const res = await apiFetch("/api/discogs/add-to-wantlist", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ username: u, token: t, releaseIds }),
@@ -901,7 +902,7 @@ export default function Home() {
       });
 
       try {
-        const res = await fetch("/api/discogs/add-to-wantlist", {
+        const res = await apiFetch("/api/discogs/add-to-wantlist", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ username: u, token: t, artist: entry.artist, title: entry.album, preview: true }),
@@ -1103,7 +1104,7 @@ export default function Home() {
               setReleases([]);
               setWantlist([]);
               setDbReady(false);
-              fetch("/api/user", { method: "DELETE" }).catch(() => {});
+              apiFetch("/api/user", { method: "DELETE" }).catch(() => {});
             }}
             className="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-400 hover:border-zinc-500"
           >
@@ -1613,7 +1614,7 @@ export default function Home() {
                       setSpotifyTopAlbums([]);
                       setSpotifyPlaylists([]);
                       setSpotifyClientId("");
-                      fetch("/api/user/spotify", { method: "DELETE" }).catch(() => {});
+                      apiFetch("/api/user/spotify", { method: "DELETE" }).catch(() => {});
                     }}
                     className="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-400 hover:border-zinc-500"
                   >
