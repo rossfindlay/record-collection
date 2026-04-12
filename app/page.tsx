@@ -13,6 +13,7 @@ import {
   buildAuthUrl,
   tracksToAlbums,
 } from "@/lib/spotify";
+import { apiFetch } from "@/lib/api";
 import rollingStone500 from "@/lib/rolling-stone-500.json";
 
 // ── Rolling Stone 500 helpers ─────────────────────────────────────────────────
@@ -73,103 +74,7 @@ function buildRS500WantlistMatches(wantlist: DiscogsWantlistItem[]): Map<number,
   return result;
 }
 
-// ── recommendation engine ─────────────────────────────────────────────────────
-
-type Recommendation = { release: DiscogsRelease; reason: string; score: number };
-
-function getRecommendations(
-  current: DiscogsRelease,
-  allReleases: DiscogsRelease[],
-  playlists: Playlist[],
-  limit = 8
-): Recommendation[] {
-  const info = current.basic_information;
-  const currentArtistNames = new Set(
-    info.artists.map((a) => normalizeArtist(a.name))
-  );
-  const currentStyles = new Set(info.styles);
-  const currentLabel = info.labels[0]?.name ?? "";
-  const currentDecade = info.year ? Math.floor(info.year / 10) : null;
-
-  // Map each release's basic_information.id → set of playlist IDs it belongs to
-  const releasePlaylistMap = new Map<number, Set<string>>();
-  for (const pl of playlists) {
-    for (const id of pl.releaseIds) {
-      if (!releasePlaylistMap.has(id)) releasePlaylistMap.set(id, new Set());
-      releasePlaylistMap.get(id)!.add(pl.id);
-    }
-  }
-  const currentPlaylists = releasePlaylistMap.get(info.id) ?? new Set<string>();
-
-  const results: Recommendation[] = [];
-
-  for (const r of allReleases) {
-    if (r.instance_id === current.instance_id) continue;
-    const ri = r.basic_information;
-
-    let score = 0;
-    const reasons: string[] = [];
-
-    // Same artist (+100)
-    const sameArtist = ri.artists.some((a) =>
-      currentArtistNames.has(normalizeArtist(a.name))
-    );
-    if (sameArtist) {
-      score += 100;
-      reasons.push("Same artist");
-    }
-
-    // Style overlap (+20 each)
-    const sharedStyles = ri.styles.filter((s) => currentStyles.has(s));
-    if (sharedStyles.length > 0) {
-      score += sharedStyles.length * 20;
-      reasons.push(
-        sharedStyles.length === 1
-          ? `Shared style: ${sharedStyles[0]}`
-          : `${sharedStyles.length} shared styles`
-      );
-    }
-
-    // Playlist co-occurrence (+25 per shared playlist)
-    const rPlaylists = releasePlaylistMap.get(ri.id) ?? new Set<string>();
-    const sharedPlaylistCount = [...rPlaylists].filter((id) =>
-      currentPlaylists.has(id)
-    ).length;
-    if (sharedPlaylistCount > 0) {
-      score += sharedPlaylistCount * 25;
-      reasons.push(
-        sharedPlaylistCount === 1
-          ? "Same playlist"
-          : `${sharedPlaylistCount} shared playlists`
-      );
-    }
-
-    // Same label (+15)
-    const rLabel = ri.labels[0]?.name ?? "";
-    if (currentLabel && rLabel && currentLabel === rLabel) {
-      score += 15;
-      reasons.push(`Same label: ${currentLabel}`);
-    }
-
-    // Same decade (+10)
-    if (
-      currentDecade !== null &&
-      ri.year &&
-      Math.floor(ri.year / 10) === currentDecade
-    ) {
-      score += 10;
-      reasons.push(`Same era (${currentDecade * 10}s)`);
-    }
-
-    if (score > 0) {
-      results.push({ release: r, reason: reasons[0], score });
-    }
-  }
-
-  return results.sort((a, b) => b.score - a.score).slice(0, limit);
-}
-
-// ── helpers ──────────────────────────────────────────────────────────────────
+// ── helpers ───���────────────────────────────────────────���─────────────────────
 
 function getGenres(releases: DiscogsRelease[]): string[] {
   const set = new Set<string>();
@@ -195,6 +100,15 @@ function saveToStorage(key: string, value: unknown) {
   } catch {
     // Silently ignore storage errors (e.g. QuotaExceededError for large datasets)
   }
+}
+
+/** Persist data to the server DB (fire-and-forget, non-blocking). */
+function syncToServer(path: string, body: unknown) {
+  apiFetch(path, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).catch(() => { /* silently ignore — localStorage is the fallback */ });
 }
 
 function uid() {
@@ -554,8 +468,12 @@ export default function Home() {
   const [newPlaylistName, setNewPlaylistName] = useState("");
   const [playlistModal, setPlaylistModal] = useState(false);
 
-  // load persisted data
+  // DB sync: whether a server session is active
+  const [dbReady, setDbReady] = useState(false);
+
+  // load persisted data — try DB session first, fall back to localStorage
   useEffect(() => {
+    // Always load localStorage immediately for fast paint
     setSavedCreds(loadFromStorage("discogs_creds", null));
     setReleases(loadFromStorage("discogs_releases", []));
     setPlaylists(loadFromStorage("discogs_playlists", []));
@@ -565,6 +483,57 @@ export default function Home() {
     setSpotifyTopTracks(loadFromStorage("spotify_top_tracks", []));
     setSpotifyTopAlbums(loadFromStorage("spotify_top_albums", []));
     setSpotifyPlaylists(loadFromStorage("spotify_playlists", []));
+
+    // Then try to hydrate from the server DB if a session cookie exists
+    (async () => {
+      try {
+        const userRes = await apiFetch("/api/user");
+        if (!userRes.ok) return; // no session — keep localStorage data
+        const user = await userRes.json();
+        setDbReady(true);
+        setSavedCreds({ username: user.discogsUsername, token: "••••" });
+
+        // Fetch all server-persisted data in parallel
+        const [collRes, wlRes, plRes, spRes] = await Promise.all([
+          apiFetch("/api/user/collection"),
+          apiFetch("/api/user/wantlist"),
+          apiFetch("/api/user/playlists"),
+          apiFetch("/api/user/spotify"),
+        ]);
+
+        if (collRes.ok) {
+          const coll = await collRes.json();
+          if (coll.releases?.length) setReleases(coll.releases);
+        }
+        if (wlRes.ok) {
+          const wl = await wlRes.json();
+          if (wl.items?.length) setWantlist(wl.items);
+        }
+        if (plRes.ok) {
+          const pl = await plRes.json();
+          if (pl.playlists?.length) {
+            setPlaylists(
+              pl.playlists.map((p: { id: string; name: string; releaseIds: number[]; createdAt: string }) => ({
+                id: p.id,
+                name: p.name,
+                releaseIds: p.releaseIds as number[],
+                createdAt: p.createdAt,
+              }))
+            );
+          }
+        }
+        if (spRes.ok) {
+          const sp = await spRes.json();
+          if (sp.tokens) setSpotifyTokens(sp.tokens);
+          if (sp.clientId) setSpotifyClientId(sp.clientId);
+          if (sp.topTracks?.length) setSpotifyTopTracks(sp.topTracks);
+          if (sp.topAlbums?.length) setSpotifyTopAlbums(sp.topAlbums);
+          if (sp.playlists?.length) setSpotifyPlaylists(sp.playlists);
+        }
+      } catch {
+        // Network error — localStorage data is already loaded
+      }
+    })();
   }, []);
 
   const fetchCollection = useCallback(async (user: string, tok: string) => {
@@ -574,7 +543,7 @@ export default function Home() {
 
     try {
       // first page to get total
-      const firstRes = await fetch(
+      const firstRes = await apiFetch(
         `/api/discogs?username=${encodeURIComponent(user)}&token=${encodeURIComponent(tok)}&page=1&per_page=100`
       );
       const first = await firstRes.json();
@@ -586,7 +555,7 @@ export default function Home() {
       setProgress({ loaded: all.length, total });
 
       for (let p = 2; p <= pages; p++) {
-        const res = await fetch(
+        const res = await apiFetch(
           `/api/discogs?username=${encodeURIComponent(user)}&token=${encodeURIComponent(tok)}&page=${p}&per_page=100`
         );
         const data = await res.json();
@@ -599,6 +568,21 @@ export default function Home() {
       saveToStorage("discogs_releases", all);
       saveToStorage("discogs_creds", { username: user, token: tok });
       setSavedCreds({ username: user, token: tok });
+
+      // Create/update server session and persist collection to DB
+      try {
+        const sessionRes = await apiFetch("/api/user", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: user, token: tok }),
+        });
+        if (sessionRes.ok) {
+          setDbReady(true);
+          syncToServer("/api/user/collection", { releases: all });
+        }
+      } catch {
+        // DB unavailable — localStorage is the fallback
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unknown error");
     } finally {
@@ -620,7 +604,7 @@ export default function Home() {
     async function fetchPage(page: number): Promise<Response> {
       const url = `/api/discogs/wantlist?username=${encodeURIComponent(user)}&token=${encodeURIComponent(tok)}&page=${page}&per_page=100`;
       for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-        const res = await fetch(url);
+        const res = await apiFetch(url);
         if (res.status === 429) {
           // Back off for progressively longer before retrying
           await new Promise((r) => setTimeout(r, 5000 * (attempt + 1)));
@@ -662,6 +646,7 @@ export default function Home() {
         },
       }));
       saveToStorage("discogs_wantlist", slim);
+      syncToServer("/api/user/wantlist", { items: slim });
     } catch (e) {
       setWantlistError(e instanceof Error ? e.message : "Unknown error");
     } finally {
@@ -696,6 +681,7 @@ export default function Home() {
       };
       setSpotifyTokens(refreshed);
       saveToStorage("spotify_tokens", refreshed);
+      syncToServer("/api/user/spotify", { tokens: refreshed });
       return refreshed.accessToken;
     } catch {
       return null;
@@ -713,6 +699,7 @@ export default function Home() {
     const redirectUri = `${window.location.origin}${window.location.pathname}`;
     saveToStorage("spotify_pkce", { verifier, state, clientId: clientId.trim() });
     saveToStorage("spotify_client_id", clientId.trim());
+    syncToServer("/api/user/spotify", { clientId: clientId.trim() });
     window.location.href = buildAuthUrl(clientId.trim(), redirectUri, challenge, state);
   }, []);
 
@@ -757,6 +744,7 @@ export default function Home() {
         };
         setSpotifyTokens(tokens);
         saveToStorage("spotify_tokens", tokens);
+        syncToServer("/api/user/spotify", { tokens });
         setView("spotify");
       } catch (e) {
         setSpotifyError(e instanceof Error ? e.message : "Spotify auth failed");
@@ -789,6 +777,7 @@ export default function Home() {
       setSpotifyTopAlbums(albums);
       saveToStorage("spotify_top_tracks", tracks);
       saveToStorage("spotify_top_albums", albums);
+      syncToServer("/api/user/spotify", { topTracks: tracks, topAlbums: albums });
     } catch (e) {
       setSpotifyError(e instanceof Error ? e.message : "Unknown error");
     } finally {
@@ -813,6 +802,7 @@ export default function Home() {
 
       setSpotifyPlaylists(data.items ?? []);
       saveToStorage("spotify_playlists", data.items ?? []);
+      syncToServer("/api/user/spotify", { playlists: data.items ?? [] });
     } catch (e) {
       setSpotifyError(e instanceof Error ? e.message : "Unknown error");
     } finally {
@@ -925,6 +915,10 @@ export default function Home() {
           };
         });
         saveToStorage("discogs_playlists", updated);
+        const changed = updated.find((pl) => pl.id === activePlaylistId);
+        if (changed) {
+          syncToServer("/api/user/playlists", { id: changed.id, releaseIds: changed.releaseIds });
+        }
         return updated;
       });
     },
@@ -943,6 +937,12 @@ export default function Home() {
     setActivePlaylistId(pl.id);
     setNewPlaylistName("");
     setPlaylistModal(false);
+    // Persist to server — create returns the DB-assigned id but we keep the local uid for now
+    apiFetch("/api/user/playlists", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, releaseIds: [] }),
+    }).catch(() => {});
   }, [newPlaylistName]);
 
   const deletePlaylist = useCallback((id: string) => {
@@ -952,6 +952,11 @@ export default function Home() {
       return updated;
     });
     setActivePlaylistId((cur) => (cur === id ? null : cur));
+    apiFetch("/api/user/playlists", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    }).catch(() => {});
   }, []);
 
   // Perform the actual wantlist adds for an RS500 entry given pre-fetched IDs.
@@ -963,7 +968,7 @@ export default function Home() {
 
       setAddingRanks((prev) => [...prev, entry.rank]);
       try {
-        const res = await fetch("/api/discogs/add-to-wantlist", {
+        const res = await apiFetch("/api/discogs/add-to-wantlist", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ username: u, token: t, releaseIds }),
@@ -1005,6 +1010,7 @@ export default function Home() {
             },
           }));
           saveToStorage("discogs_wantlist", slim);
+          syncToServer("/api/user/wantlist", { items: slim });
           return updated;
         });
       } catch (e) {
@@ -1036,7 +1042,7 @@ export default function Home() {
       });
 
       try {
-        const res = await fetch("/api/discogs/add-to-wantlist", {
+        const res = await apiFetch("/api/discogs/add-to-wantlist", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ username: u, token: t, artist: entry.artist, title: entry.album, preview: true }),
@@ -1090,6 +1096,10 @@ export default function Home() {
             : pl
         );
         saveToStorage("discogs_playlists", updated);
+        const changed = updated.find((pl) => pl.id === activePlaylistId);
+        if (changed) {
+          syncToServer("/api/user/playlists", { id: changed.id, releaseIds: changed.releaseIds });
+        }
         return updated;
       });
     },
@@ -1239,6 +1249,8 @@ export default function Home() {
               setSavedCreds(null);
               setReleases([]);
               setWantlist([]);
+              setDbReady(false);
+              apiFetch("/api/user", { method: "DELETE" }).catch(() => {});
             }}
             className="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-400 hover:border-zinc-500"
           >
@@ -1760,6 +1772,7 @@ export default function Home() {
                       setSpotifyTopAlbums([]);
                       setSpotifyPlaylists([]);
                       setSpotifyClientId("");
+                      apiFetch("/api/user/spotify", { method: "DELETE" }).catch(() => {});
                     }}
                     className="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-400 hover:border-zinc-500"
                   >
