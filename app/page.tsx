@@ -73,7 +73,7 @@ function buildRS500WantlistMatches(wantlist: DiscogsWantlistItem[]): Map<number,
   return result;
 }
 
-// ── helpers ──────────────────────────────────────────────────────────────────
+// ── helpers ───���────────────────────────────────────────���─────────────────────
 
 function getGenres(releases: DiscogsRelease[]): string[] {
   const set = new Set<string>();
@@ -99,6 +99,15 @@ function saveToStorage(key: string, value: unknown) {
   } catch {
     // Silently ignore storage errors (e.g. QuotaExceededError for large datasets)
   }
+}
+
+/** Persist data to the server DB (fire-and-forget, non-blocking). */
+function syncToServer(path: string, body: unknown) {
+  fetch(path, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).catch(() => { /* silently ignore — localStorage is the fallback */ });
 }
 
 function uid() {
@@ -318,8 +327,12 @@ export default function Home() {
   const [newPlaylistName, setNewPlaylistName] = useState("");
   const [playlistModal, setPlaylistModal] = useState(false);
 
-  // load persisted data
+  // DB sync: whether a server session is active
+  const [dbReady, setDbReady] = useState(false);
+
+  // load persisted data — try DB session first, fall back to localStorage
   useEffect(() => {
+    // Always load localStorage immediately for fast paint
     setSavedCreds(loadFromStorage("discogs_creds", null));
     setReleases(loadFromStorage("discogs_releases", []));
     setPlaylists(loadFromStorage("discogs_playlists", []));
@@ -329,6 +342,57 @@ export default function Home() {
     setSpotifyTopTracks(loadFromStorage("spotify_top_tracks", []));
     setSpotifyTopAlbums(loadFromStorage("spotify_top_albums", []));
     setSpotifyPlaylists(loadFromStorage("spotify_playlists", []));
+
+    // Then try to hydrate from the server DB if a session cookie exists
+    (async () => {
+      try {
+        const userRes = await fetch("/api/user");
+        if (!userRes.ok) return; // no session — keep localStorage data
+        const user = await userRes.json();
+        setDbReady(true);
+        setSavedCreds({ username: user.discogsUsername, token: "••••" });
+
+        // Fetch all server-persisted data in parallel
+        const [collRes, wlRes, plRes, spRes] = await Promise.all([
+          fetch("/api/user/collection"),
+          fetch("/api/user/wantlist"),
+          fetch("/api/user/playlists"),
+          fetch("/api/user/spotify"),
+        ]);
+
+        if (collRes.ok) {
+          const coll = await collRes.json();
+          if (coll.releases?.length) setReleases(coll.releases);
+        }
+        if (wlRes.ok) {
+          const wl = await wlRes.json();
+          if (wl.items?.length) setWantlist(wl.items);
+        }
+        if (plRes.ok) {
+          const pl = await plRes.json();
+          if (pl.playlists?.length) {
+            setPlaylists(
+              pl.playlists.map((p: { id: string; name: string; releaseIds: number[]; createdAt: string }) => ({
+                id: p.id,
+                name: p.name,
+                releaseIds: p.releaseIds as number[],
+                createdAt: p.createdAt,
+              }))
+            );
+          }
+        }
+        if (spRes.ok) {
+          const sp = await spRes.json();
+          if (sp.tokens) setSpotifyTokens(sp.tokens);
+          if (sp.clientId) setSpotifyClientId(sp.clientId);
+          if (sp.topTracks?.length) setSpotifyTopTracks(sp.topTracks);
+          if (sp.topAlbums?.length) setSpotifyTopAlbums(sp.topAlbums);
+          if (sp.playlists?.length) setSpotifyPlaylists(sp.playlists);
+        }
+      } catch {
+        // Network error — localStorage data is already loaded
+      }
+    })();
   }, []);
 
   const fetchCollection = useCallback(async (user: string, tok: string) => {
@@ -363,6 +427,21 @@ export default function Home() {
       saveToStorage("discogs_releases", all);
       saveToStorage("discogs_creds", { username: user, token: tok });
       setSavedCreds({ username: user, token: tok });
+
+      // Create/update server session and persist collection to DB
+      try {
+        const sessionRes = await fetch("/api/user", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: user, token: tok }),
+        });
+        if (sessionRes.ok) {
+          setDbReady(true);
+          syncToServer("/api/user/collection", { releases: all });
+        }
+      } catch {
+        // DB unavailable — localStorage is the fallback
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unknown error");
     } finally {
@@ -426,6 +505,7 @@ export default function Home() {
         },
       }));
       saveToStorage("discogs_wantlist", slim);
+      syncToServer("/api/user/wantlist", { items: slim });
     } catch (e) {
       setWantlistError(e instanceof Error ? e.message : "Unknown error");
     } finally {
@@ -460,6 +540,7 @@ export default function Home() {
       };
       setSpotifyTokens(refreshed);
       saveToStorage("spotify_tokens", refreshed);
+      syncToServer("/api/user/spotify", { tokens: refreshed });
       return refreshed.accessToken;
     } catch {
       return null;
@@ -477,6 +558,7 @@ export default function Home() {
     const redirectUri = `${window.location.origin}${window.location.pathname}`;
     saveToStorage("spotify_pkce", { verifier, state, clientId: clientId.trim() });
     saveToStorage("spotify_client_id", clientId.trim());
+    syncToServer("/api/user/spotify", { clientId: clientId.trim() });
     window.location.href = buildAuthUrl(clientId.trim(), redirectUri, challenge, state);
   }, []);
 
@@ -521,6 +603,7 @@ export default function Home() {
         };
         setSpotifyTokens(tokens);
         saveToStorage("spotify_tokens", tokens);
+        syncToServer("/api/user/spotify", { tokens });
         setView("spotify");
       } catch (e) {
         setSpotifyError(e instanceof Error ? e.message : "Spotify auth failed");
@@ -553,6 +636,7 @@ export default function Home() {
       setSpotifyTopAlbums(albums);
       saveToStorage("spotify_top_tracks", tracks);
       saveToStorage("spotify_top_albums", albums);
+      syncToServer("/api/user/spotify", { topTracks: tracks, topAlbums: albums });
     } catch (e) {
       setSpotifyError(e instanceof Error ? e.message : "Unknown error");
     } finally {
@@ -577,6 +661,7 @@ export default function Home() {
 
       setSpotifyPlaylists(data.items ?? []);
       saveToStorage("spotify_playlists", data.items ?? []);
+      syncToServer("/api/user/spotify", { playlists: data.items ?? [] });
     } catch (e) {
       setSpotifyError(e instanceof Error ? e.message : "Unknown error");
     } finally {
@@ -689,6 +774,10 @@ export default function Home() {
           };
         });
         saveToStorage("discogs_playlists", updated);
+        const changed = updated.find((pl) => pl.id === activePlaylistId);
+        if (changed) {
+          syncToServer("/api/user/playlists", { id: changed.id, releaseIds: changed.releaseIds });
+        }
         return updated;
       });
     },
@@ -707,6 +796,12 @@ export default function Home() {
     setActivePlaylistId(pl.id);
     setNewPlaylistName("");
     setPlaylistModal(false);
+    // Persist to server — create returns the DB-assigned id but we keep the local uid for now
+    fetch("/api/user/playlists", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, releaseIds: [] }),
+    }).catch(() => {});
   }, [newPlaylistName]);
 
   const deletePlaylist = useCallback((id: string) => {
@@ -716,6 +811,11 @@ export default function Home() {
       return updated;
     });
     setActivePlaylistId((cur) => (cur === id ? null : cur));
+    fetch("/api/user/playlists", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    }).catch(() => {});
   }, []);
 
   // Perform the actual wantlist adds for an RS500 entry given pre-fetched IDs.
@@ -769,6 +869,7 @@ export default function Home() {
             },
           }));
           saveToStorage("discogs_wantlist", slim);
+          syncToServer("/api/user/wantlist", { items: slim });
           return updated;
         });
       } catch (e) {
@@ -854,6 +955,10 @@ export default function Home() {
             : pl
         );
         saveToStorage("discogs_playlists", updated);
+        const changed = updated.find((pl) => pl.id === activePlaylistId);
+        if (changed) {
+          syncToServer("/api/user/playlists", { id: changed.id, releaseIds: changed.releaseIds });
+        }
         return updated;
       });
     },
@@ -997,6 +1102,8 @@ export default function Home() {
               setSavedCreds(null);
               setReleases([]);
               setWantlist([]);
+              setDbReady(false);
+              fetch("/api/user", { method: "DELETE" }).catch(() => {});
             }}
             className="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-400 hover:border-zinc-500"
           >
@@ -1506,6 +1613,7 @@ export default function Home() {
                       setSpotifyTopAlbums([]);
                       setSpotifyPlaylists([]);
                       setSpotifyClientId("");
+                      fetch("/api/user/spotify", { method: "DELETE" }).catch(() => {});
                     }}
                     className="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-400 hover:border-zinc-500"
                   >

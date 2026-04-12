@@ -1,0 +1,60 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id             String   @id @default(cuid())
+  discogsUsername String   @unique
+  discogsToken   String? // stored encrypted via lib/auth.ts
+  spotifyClientId String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  collection  CachedCollection?
+  wantlist    CachedWantlist?
+  playlists   Playlist[]
+  spotifyData SpotifyCache?
+}
+
+model CachedCollection {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  releases  Json // full DiscogsRelease[] array
+  fetchedAt DateTime @default(now())
+}
+
+model CachedWantlist {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items     Json // slim wantlist items array
+  fetchedAt DateTime @default(now())
+}
+
+model Playlist {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name       String
+  releaseIds Json // number[] of Discogs release IDs
+  createdAt  DateTime @default(now())
+}
+
+model SpotifyCache {
+  id           String   @id @default(cuid())
+  userId       String   @unique
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken  String? // stored encrypted
+  refreshToken String? // stored encrypted
+  expiresAt    BigInt?
+  topTracks    Json?
+  topAlbums    Json?
+  playlists    Json?
+  fetchedAt    DateTime @default(now())
+}
