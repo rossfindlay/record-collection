@@ -115,6 +115,54 @@ function uid() {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
+// ── recommendations ───────────────────────────────────────────────────────────
+
+type Recommendation = { release: DiscogsRelease; reason: string };
+
+function getRecommendations(
+  nowPlaying: DiscogsRelease,
+  releases: DiscogsRelease[],
+  _playlists: Playlist[]
+): Recommendation[] {
+  const info = nowPlaying.basic_information;
+  const scored: Array<{ release: DiscogsRelease; score: number; reason: string }> = [];
+
+  for (const r of releases) {
+    if (r.instance_id === nowPlaying.instance_id) continue;
+    const ri = r.basic_information;
+    let score = 0;
+    let reason = "";
+
+    const sameArtist = ri.artists.some((a) =>
+      info.artists.some((b) => a.id === b.id)
+    );
+    if (sameArtist) {
+      score += 10;
+      reason = ri.artists[0].name.replace(/ \(\d+\)$/, "");
+    }
+
+    for (const s of ri.styles) {
+      if (info.styles.includes(s)) {
+        score += 3;
+        if (!reason) reason = s;
+      }
+    }
+    for (const g of ri.genres) {
+      if (info.genres.includes(g)) {
+        score += 1;
+        if (!reason) reason = g;
+      }
+    }
+
+    if (score > 0) scored.push({ release: r, score, reason });
+  }
+
+  return scored
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5)
+    .map(({ release, reason }) => ({ release, reason }));
+}
+
 // ── sub-components ────────────────────────────────────────────────────────────
 
 function RecordCard({
