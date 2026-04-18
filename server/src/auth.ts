@@ -60,8 +60,7 @@ export function setSessionCookie(res: Response, userId: string) {
   res.cookie(SESSION_COOKIE, token, {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
-    // Cross-site cookie: Vercel frontend → Railway backend
-    sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+    sameSite: "lax",
     maxAge: SESSION_MAX_AGE_SEC * 1000,
     path: "/",
   });
