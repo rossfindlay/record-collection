@@ -591,7 +591,7 @@ export default function Home() {
 
     try {
       // first page to get total
-      const firstRes = await apiFetch(
+      const firstRes = await fetch(
         `/api/discogs?username=${encodeURIComponent(user)}&token=${encodeURIComponent(tok)}&page=1&per_page=100`
       );
       const first = await firstRes.json();
@@ -603,7 +603,7 @@ export default function Home() {
       setProgress({ loaded: all.length, total });
 
       for (let p = 2; p <= pages; p++) {
-        const res = await apiFetch(
+        const res = await fetch(
           `/api/discogs?username=${encodeURIComponent(user)}&token=${encodeURIComponent(tok)}&page=${p}&per_page=100`
         );
         const data = await res.json();
@@ -652,7 +652,7 @@ export default function Home() {
     async function fetchPage(page: number): Promise<Response> {
       const url = `/api/discogs/wantlist?username=${encodeURIComponent(user)}&token=${encodeURIComponent(tok)}&page=${page}&per_page=100`;
       for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-        const res = await apiFetch(url);
+        const res = await fetch(url);
         if (res.status === 429) {
           // Back off for progressively longer before retrying
           await new Promise((r) => setTimeout(r, 5000 * (attempt + 1)));
@@ -1016,7 +1016,7 @@ export default function Home() {
 
       setAddingRanks((prev) => [...prev, entry.rank]);
       try {
-        const res = await apiFetch("/api/discogs/add-to-wantlist", {
+        const res = await fetch("/api/discogs/add-to-wantlist", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ username: u, token: t, releaseIds }),
@@ -1090,7 +1090,7 @@ export default function Home() {
       });
 
       try {
-        const res = await apiFetch("/api/discogs/add-to-wantlist", {
+        const res = await fetch("/api/discogs/add-to-wantlist", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ username: u, token: t, artist: entry.artist, title: entry.album, preview: true }),
