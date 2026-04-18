@@ -108,7 +108,11 @@ function syncToServer(path: string, body: unknown) {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
-  }).catch(() => { /* silently ignore — localStorage is the fallback */ });
+  }).then((res) => {
+    if (!res.ok) console.warn(`[syncToServer] ${path} failed:`, res.status);
+  }).catch((err) => {
+    console.warn(`[syncToServer] ${path} network error:`, err);
+  });
 }
 
 function uid() {
@@ -627,9 +631,11 @@ export default function Home() {
         if (sessionRes.ok) {
           setDbReady(true);
           syncToServer("/api/user/collection", { releases: all });
+        } else {
+          console.warn("[session] POST /api/user failed:", sessionRes.status);
         }
-      } catch {
-        // DB unavailable — localStorage is the fallback
+      } catch (err) {
+        console.warn("[session] POST /api/user network error:", err);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unknown error");
