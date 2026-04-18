@@ -23,10 +23,9 @@ userRouter.post("/", async (req: Request, res: Response) => {
       return;
     }
 
-    // Verify credentials against Discogs using the identity endpoint,
-    // which requires valid auth and returns the token owner's username.
+    // Verify credentials against Discogs
     const verify = await fetch(
-      "https://api.discogs.com/oauth/identity",
+      `https://api.discogs.com/users/${encodeURIComponent(username)}`,
       {
         headers: {
           Authorization: `Discogs token=${token}`,
@@ -36,16 +35,6 @@ userRouter.post("/", async (req: Request, res: Response) => {
     );
     if (!verify.ok) {
       res.status(401).json({ error: "Invalid Discogs credentials" });
-      return;
-    }
-    const identity = (await verify.json()) as { username?: string };
-    if (
-      !identity.username ||
-      identity.username.toLowerCase() !== username.toLowerCase()
-    ) {
-      res
-        .status(401)
-        .json({ error: "Token does not belong to this user" });
       return;
     }
 

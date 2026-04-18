@@ -645,25 +645,20 @@ export default function Home() {
     setLoading(true);
     setError("");
 
+    setSavedCreds({ username: user, token: tok });
+    saveToStorage("discogs_creds", { username: user, token: tok });
+
     try {
       const sessionRes = await apiFetch("/api/user", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username: user, token: tok }),
       });
-      if (!sessionRes.ok) {
-        const data = await sessionRes.json().catch(() => ({}));
-        setError((data as { error?: string }).error || "Login failed");
-        setLoading(false);
-        return;
+      if (sessionRes.ok) {
+        setDbReady(true);
       }
-      setDbReady(true);
-      setSavedCreds({ username: user, token: tok });
-      saveToStorage("discogs_creds", { username: user, token: tok });
     } catch {
-      setError("Could not connect to server");
-      setLoading(false);
-      return;
+      // Backend unavailable — continue without server session
     }
 
     await fetchCollection(user, tok);
