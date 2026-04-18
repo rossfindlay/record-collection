@@ -522,12 +522,15 @@ export default function Home() {
 
   // DB sync: whether a server session is active
   const [dbReady, setDbReady] = useState(false);
+  const [authChecking, setAuthChecking] = useState(true);
 
   // load persisted data — try DB session first, fall back to localStorage
   useEffect(() => {
     // Always load localStorage immediately for fast paint
-    setSavedCreds(loadFromStorage("discogs_creds", null));
-    setReleases(loadFromStorage("discogs_releases", []));
+    const storedCreds = loadFromStorage<{ username: string; token: string } | null>("discogs_creds", null);
+    const storedReleases = loadFromStorage<DiscogsRelease[]>("discogs_releases", []);
+    setSavedCreds(storedCreds);
+    setReleases(storedReleases);
     setPlaylists(loadFromStorage("discogs_playlists", []));
     setWantlist(loadFromStorage("discogs_wantlist", []));
     setSpotifyTokens(loadFromStorage("spotify_tokens", null));
@@ -536,6 +539,10 @@ export default function Home() {
     setSpotifyTopAlbums(loadFromStorage("spotify_top_albums", []));
     setSpotifyPlaylists(loadFromStorage("spotify_playlists", []));
 
+    if (storedCreds || storedReleases.length > 0) {
+      setAuthChecking(false);
+    }
+
     // Then try to hydrate from the server DB if a session cookie exists
     (async () => {
       try {
@@ -543,7 +550,10 @@ export default function Home() {
         if (!userRes.ok) return; // no session — keep localStorage data
         const user = await userRes.json();
         setDbReady(true);
-        setSavedCreds({ username: user.discogsUsername, token: "••••" });
+        setSavedCreds({
+          username: user.discogsUsername,
+          token: storedCreds?.token ?? "••••",
+        });
 
         // Fetch all server-persisted data in parallel
         const [collRes, wlRes, plRes, spRes] = await Promise.all([
@@ -584,6 +594,8 @@ export default function Home() {
         }
       } catch {
         // Network error — localStorage data is already loaded
+      } finally {
+        setAuthChecking(false);
       }
     })();
   }, []);
@@ -621,28 +633,41 @@ export default function Home() {
       saveToStorage("discogs_creds", { username: user, token: tok });
       setSavedCreds({ username: user, token: tok });
 
-      // Create/update server session and persist collection to DB
-      try {
-        const sessionRes = await apiFetch("/api/user", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ username: user, token: tok }),
-        });
-        if (sessionRes.ok) {
-          setDbReady(true);
-          syncToServer("/api/user/collection", { releases: all });
-        } else {
-          console.warn("[session] POST /api/user failed:", sessionRes.status);
-        }
-      } catch (err) {
-        console.warn("[session] POST /api/user network error:", err);
-      }
+      syncToServer("/api/user/collection", { releases: all });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unknown error");
     } finally {
       setLoading(false);
     }
   }, []);
+
+  const handleLogin = useCallback(async (user: string, tok: string) => {
+    setLoading(true);
+    setError("");
+
+    try {
+      const sessionRes = await apiFetch("/api/user", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: user, token: tok }),
+      });
+      if (!sessionRes.ok) {
+        const data = await sessionRes.json().catch(() => ({}));
+        setError((data as { error?: string }).error || "Login failed");
+        setLoading(false);
+        return;
+      }
+      setDbReady(true);
+      setSavedCreds({ username: user, token: tok });
+      saveToStorage("discogs_creds", { username: user, token: tok });
+    } catch {
+      setError("Could not connect to server");
+      setLoading(false);
+      return;
+    }
+
+    await fetchCollection(user, tok);
+  }, [fetchCollection]);
 
   const fetchWantlist = useCallback(async (user: string, tok: string) => {
     setWantlistLoading(true);
@@ -1195,6 +1220,16 @@ export default function Home() {
     ? releases.filter((r) => activePlaylist.releaseIds.includes(r.basic_information.id))
     : [];
 
+  // ── render: loading ──────────────────────────────────────────────────────────
+
+  if (authChecking) {
+    return (
+      <div className="flex min-h-screen items-center justify-center">
+        <p className="text-zinc-400">Loading...</p>
+      </div>
+    );
+  }
+
   // ── render: login ────────────────────────────────────────────────────────────
 
   if (!savedCreds && releases.length === 0) {
@@ -1238,11 +1273,11 @@ export default function Home() {
               </p>
             </div>
             <button
-              onClick={() => fetchCollection(username, token)}
+              onClick={() => handleLogin(username, token)}
               disabled={!username || !token || loading}
               className="w-full rounded-lg bg-amber-500 py-2.5 font-semibold text-zinc-950 transition-colors hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {loading ? "Loading..." : "Load Collection"}
+              {loading ? "Loading..." : "Sign In"}
             </button>
           </div>
           {loading && progress.total > 0 && (
