@@ -16,7 +16,7 @@ const PORT = Number(process.env.PORT) || 8080;
 // Allowed frontend origins (comma-separated in env, or localhost in dev).
 const allowedOrigins = (process.env.CORS_ORIGIN ?? "http://localhost:3000")
   .split(",")
-  .map((s) => s.trim())
+  .map((s) => s.trim().replace(/\/+$/, ""))
   .filter(Boolean);
 
 app.use(
